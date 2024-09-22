@@ -1,0 +1,1 @@
+# plugins-woocommerce-sendinblue-newsletter-subscription
