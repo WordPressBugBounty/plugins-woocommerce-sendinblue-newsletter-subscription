@@ -612,22 +612,27 @@ class ApiManager
             return;
         }
 
-        $opt_in_checked = "false";
+        $opt_in_checked = false;
+        $opt_in_enabled = false;
 
-        if (empty($settings[SendinblueClient::IS_DISPLAY_OPT_IN_ENABLED]) || get_post_meta($id, 'ws_opt_in', true)) {
-            $opt_in_checked = "true";
+        if (!empty($settings[SendinblueClient::IS_DISPLAY_OPT_IN_ENABLED])) {
+            $opt_in_enabled = true;
+        }
+
+        if ($opt_in_enabled && get_post_meta($id, 'ws_opt_in', true)) {
+            $opt_in_checked = true;
         }
 
         if (!empty($settings[SendinblueClient::IS_SUBSCRIBE_EVENT_ENABLED])
             && $settings[SendinblueClient::IS_SUBSCRIBE_EVENT_ENABLED] == 1
             && (strpos(SendinblueClient::NEW_ORDER_STATUS, $new_status) !== false)
         ) {
-            $this->trigger_event_customer_sync($order, $opt_in_checked);
+            $this->trigger_event_customer_sync($order, $opt_in_enabled, $opt_in_checked);
         } elseif (!empty($settings[SendinblueClient::IS_SUBSCRIBE_EVENT_ENABLED])
             && $settings[SendinblueClient::IS_SUBSCRIBE_EVENT_ENABLED] == 2
             && (strpos(SendinblueClient::COMPLETED_ORDER_STATUS, $new_status) !== false)
         ) {
-            $this->trigger_event_customer_sync($order, $opt_in_checked);
+            $this->trigger_event_customer_sync($order, $opt_in_enabled, $opt_in_checked);
         }
 
         if (!empty($settings[SendinblueClient::IS_ORDER_CONFIRMATION_SMS])
@@ -645,18 +650,17 @@ class ApiManager
         }
     }
 
-    private function trigger_event_customer_sync($data, $opt_in_checked)
+    private function trigger_event_customer_sync($data, $opt_in_enabled, $opt_in_checked)
     {
-        $data = $this->prepare_customer_payload($data, $opt_in_checked);
+        $data = $this->prepare_customer_payload($data, $opt_in_enabled, $opt_in_checked);
         $client = new SendinblueClient();
         $client->eventsSync(SendinblueClient::ORDER_CREATED, $data);
         $client->eventsSync(SendinblueClient::CONTACT_CREATED, $data);
     }
 
-    private function prepare_customer_payload($order, $opt_in_checked)
+    private function prepare_customer_payload($order, $opt_in_enabled, $opt_in_checked)
     {
         $customer_data = $order->get_data();
-        $order_info = array();
 
         $customer_data['id'] = $customer_data['customer_id'];
         $customer_data['first_name'] = $customer_data['billing']['first_name'];
@@ -664,16 +668,19 @@ class ApiManager
         $customer_data['email'] = $customer_data['billing']['email'];
         $customer_data['subscribed'] = "false";
         $customer_data['is_customer'] = "false";
-        if (!empty($customer_data['customer_id'])) {
-            $main_customer = get_userdata($customer_data['customer_id']);
-            $customer_data['date_created_gmt'] = $main_customer->user_registered;
-            $customer_data['email'] = $main_customer->user_email;
+
+        if (empty($opt_in_enabled)) {
             $customer_data['subscribed'] = "true";
-            $customer_data['is_customer'] = "true";
-        } elseif ($opt_in_checked == "true") {
+        } elseif ($opt_in_checked) {
             $customer_data['subscribed'] = "true";
+            if (!empty($customer_data['customer_id'])) {
+                $main_customer = get_userdata($customer_data['customer_id']);
+                $customer_data['date_created_gmt'] = $main_customer->user_registered;
+                $customer_data['email'] = $main_customer->user_email;
+                $customer_data['is_customer'] = "true";
+            }
         }
-        $customer_data['opt_in_checked'] = $opt_in_checked; //true when either no optin box or optin box is checked
+        $customer_data['opt_in_checked'] = $opt_in_enabled && $opt_in_checked ? "true" : "false"; //true when either no optin box or optin box is checked
         $customer_data['order_id'] = $order->get_order_number();
         $customer_data['order_date'] = gmdate('Y-m-d', strtotime($order->get_date_created()));
         $customer_data['order_price'] = $order->get_total();
@@ -1004,6 +1011,12 @@ class ApiManager
             $reply_to =  $this->get_admin_details()['email']; //Admin email address
 
             if ($settings[SendinblueClient::IS_CUSTOMER_NOTE_TEMPLATE_ENABLED] && !empty($settings[SendinblueClient::CUSTOMER_NOTE_TEMPLATE_ID])) {
+                $customer_note = isset($all_customer_notes[0]->content)  ? $all_customer_notes[0]->content : "";
+                if (empty($customer_note)) {
+                    $customer_note = get_comment($note_id);
+                }
+                $order_details["CUSTOMER_NOTE"] = $customer_note;
+
                 $this->trigger_event_email_sib($order_details['BILLING_EMAIL'], $order_details, $settings[SendinblueClient::CUSTOMER_NOTE_TEMPLATE_ID],  self::EVENT_GROUP_SIB, $attachment_path, $tags, $reply_to);
             } else {
                 $order = $this->wc_get_order($order->get_order_number());
