@@ -84,7 +84,7 @@ class AdminManager
             $query_params['consumerKey'] = $key->consumer_key;
             $query_params['consumerSecret'] = $key->consumer_secret;
             $query_params['language'] = current(explode("_", get_locale()));
-            $query_params['url'] = get_site_url();
+            $query_params['url'] = get_home_url();
             $query_params['callback'] = $query_params['url'] . '/index.php?pagename=sendinblue-callback';
 
             $connectUrl = SendinblueClient::INTEGRATION_URL . SendinblueClient::CONNECT_URL . '?' . http_build_query($query_params);

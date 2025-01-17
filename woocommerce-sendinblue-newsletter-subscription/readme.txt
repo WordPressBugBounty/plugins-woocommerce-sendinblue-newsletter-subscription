@@ -168,6 +168,9 @@ If you need some assistance, you can post an issue in the Support tab, or send u
 4. You can access your settings by clicking on “Settings” at the top right of the screen.
 
 == Changelog ==
+= 4.0.33 =
+* Improvements related to fetching the shop url
+
 = 4.0.32 =
 * Included Customer Note in Order Events
 
