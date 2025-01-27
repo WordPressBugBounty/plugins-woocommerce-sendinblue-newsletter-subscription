@@ -276,6 +276,7 @@ class CartEventsManagers
     public function get_tracking_data_cart($cart_id, $email = "")
     {
         $data = array();
+        WC()->cart->calculate_totals(); //Force WC to recalculate the cart to avoid discrepancies
         $cartitems = WC()->cart->get_cart();
         $totals = WC()->cart->get_totals();
 
