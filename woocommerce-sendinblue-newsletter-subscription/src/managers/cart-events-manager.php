@@ -529,6 +529,43 @@ class CartEventsManagers
         update_post_meta($order_id, 'ws_opt_in', $opt_in);
     }
 
+    public function add_optin_wc_checkout_block() 
+    {
+        $settings = $this->api_manager->get_settings();
+        $checkout_label = $this->checkout_label($settings);
+        $location = "";
+
+        //Mapping of old Under billing & Under T & C to Under contact info
+        if (
+            !empty($settings[SendinblueClient::IS_DISPLAY_OPT_IN_ENABLED]) && (
+            $settings[SendinblueClient::DISPLAY_OPT_IN_LOCATION] == 1 || $settings[SendinblueClient::DISPLAY_OPT_IN_LOCATION] == 3 )
+        ) {
+            $location = "contact";
+            $this->register_checkout_fields($checkout_label, $location);
+        }
+
+        //Mapping of Under Order Info to Under Order Info
+        if (
+            !empty($settings[SendinblueClient::IS_DISPLAY_OPT_IN_ENABLED]) &&
+            $settings[SendinblueClient::DISPLAY_OPT_IN_LOCATION] == 2
+        ) {
+            $location = "order";
+            $this->register_checkout_fields($checkout_label, $location);
+        }
+    }
+
+    public function register_checkout_fields($checkout_label, $location) {
+        woocommerce_register_additional_checkout_field(
+            array(
+                'id'            => 'SendinblueWoocommerce/newsletter_opt_in',
+                'label'         => $checkout_label,
+                'location'      => $location,
+                'required'      => true,
+                    'type'     => 'checkbox',
+            ),
+        );
+    }
+
     private function get_dynamic_img($html_tags)
     {
         if (!class_exists("DOMDocument") || empty($html_tags)) {

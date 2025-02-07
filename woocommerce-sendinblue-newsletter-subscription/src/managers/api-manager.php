@@ -73,6 +73,13 @@ class ApiManager
         add_action( 'woocommerce_before_single_product_summary', array($products_events_manager, 'product_viewed'), 10);
     }
 
+    public function add_conditional_hooks() {
+        $cart_events_manager = new CartEventsManagers();
+        add_action('woocommerce_checkout_after_terms_and_conditions', array($cart_events_manager, 'add_optin_terms'));
+        add_filter('woocommerce_checkout_fields', array($cart_events_manager, 'add_optin_billing'));
+        add_action('woocommerce_checkout_update_order_meta', array($cart_events_manager, 'add_optin_order'));
+    }
+
     public function add_rest_endpoints()
     {
         $routes = array(
@@ -615,11 +622,14 @@ class ApiManager
         $opt_in_checked = false;
         $opt_in_enabled = false;
 
+        $oldPluginOptInValue = get_post_meta($id, 'ws_opt_in', true);
+        $newPluginOptInValue = $order->get_meta('_wc_other/SendinblueWoocommerce/newsletter_opt_in'); //new optin field for checkout blocks
+
         if (!empty($settings[SendinblueClient::IS_DISPLAY_OPT_IN_ENABLED])) {
             $opt_in_enabled = true;
         }
 
-        if ($opt_in_enabled && get_post_meta($id, 'ws_opt_in', true)) {
+        if ($opt_in_enabled && ($oldPluginOptInValue || $newPluginOptInValue)) {
             $opt_in_checked = true;
         }
 
