@@ -46,9 +46,6 @@ class ApiManager
         $products_events_manager = new ProductsManager();
         $category_events_manager = new CategoryManager();
         $order_events_manager = new OrdersManager();
-        add_action('woocommerce_checkout_after_terms_and_conditions', array($cart_events_manager, 'add_optin_terms'));
-        add_filter('woocommerce_checkout_fields', array($cart_events_manager, 'add_optin_billing'));
-        add_action('woocommerce_checkout_update_order_meta', array($cart_events_manager, 'add_optin_order'));
         add_action('wp_login', array($cart_events_manager, 'wp_login_action'), 11, 2);
         add_action('wp_footer', array($cart_events_manager, 'ws_cart_custom_fragment_load'));
         add_filter('woocommerce_add_to_cart_fragments', array($cart_events_manager, 'ws_cart_custom_fragment'), 10, 1);
