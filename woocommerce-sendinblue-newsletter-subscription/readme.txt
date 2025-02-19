@@ -168,6 +168,10 @@ If you need some assistance, you can post an issue in the Support tab, or send u
 4. You can access your settings by clicking on “Settings” at the top right of the screen.
 
 == Changelog ==
+= 4.0.37 =
+* Improvement related to plugin_updated call
+* Plugin code enhancements for WooCommerce Checkout Block
+
 = 4.0.36 =
 * Fixed bug related to checkbox appearing twice on Checkout page
 

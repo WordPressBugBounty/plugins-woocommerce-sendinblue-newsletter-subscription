@@ -98,15 +98,30 @@ class AdminManager
     
     public function brevo_hook_javascript_footer()
     {
-        $output = '<script type="text/javascript">for(var textFields=document.querySelectorAll(\'input[type="email"]\'),i=0;i<textFields.length;i++){textFields[i].addEventListener("blur",function(){const regexEmail = /^[#&*\/=?^{!}~\'_a-z0-9-\+]+([#&*\/=?^{!}~\'_a-z0-9-\+]+)*(\.[#&*\/=?^{!}~\'_a-z0-9-\+]+)*[.]?@[_a-z0-9-]+(\.[_a-z0-9-]+)*(\.[a-z0-9]{2,63})$/i;if(!regexEmail.test(textFields[i].value)){return false;}if(getCookieValueByName("tracking_email") == encodeURIComponent(textFields[i].value)){return false;}document.cookie="tracking_email="+encodeURIComponent(textFields[i].value)+"; path=/";
-            var xhrobj = new XMLHttpRequest();
-            xhrobj.open("POST","/wp-admin/admin-ajax.php");
-            var params = "action=the_ajax_hook&tracking_email="+ encodeURIComponent(textFields[i].value);
-            xhrobj.setRequestHeader("Content-type", "application/x-www-form-urlencoded");
-            xhrobj.send(params);
-        });break;}
-		function getCookieValueByName(name) {var match = document.cookie.match(new RegExp("(^| )" + name + "=([^;]+)"));return match ? match[2] : "";}        
-		</script>';
+        $output = '<script type="text/javascript">
+                    document.body.addEventListener("blur", function(event) {
+                        if (event.target.matches("input[type=\'email\']")) {
+                            const regexEmail = /^[#&*\/=?^{!}~\'_a-z0-9-\+]+([#&*\/=?^{!}~\'_a-z0-9-\+]+)*(\.[#&*\/=?^{!}~\'_a-z0-9-\+]+)*[.]?@[_a-z0-9-]+(\.[_a-z0-9-]+)*(\.[a-z0-9]{2,63})$/i;
+                            if (!regexEmail.test(event.target.value)) {
+                                return false;
+                            }
+                            if (getCookieValueByName("tracking_email") == encodeURIComponent(event.target.value)) {
+                                return false;
+                            }
+                            document.cookie="tracking_email="+encodeURIComponent(event.target.value)+"; path=/";
+                            var xhrobj = new XMLHttpRequest();
+                            xhrobj.open("POST","/wp-admin/admin-ajax.php");
+                            var params = "action=the_ajax_hook&tracking_email=" + encodeURIComponent(event.target.value);
+                            xhrobj.setRequestHeader("Content-type", "application/x-www-form-urlencoded");
+                            xhrobj.send(params);
+                            return;
+                        }
+                    }, true);
+                    function getCookieValueByName(name) {
+                        var match = document.cookie.match(new RegExp("(^| )" + name + "=([^;]+)"));
+                        return match ? match[2] : "";
+                    }
+                </script>';
         echo $output;
     }
 
