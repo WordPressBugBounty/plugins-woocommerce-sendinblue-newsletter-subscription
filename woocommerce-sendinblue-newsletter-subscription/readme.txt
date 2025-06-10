@@ -168,6 +168,9 @@ If you need some assistance, you can post an issue in the Support tab, or send u
 4. You can access your settings by clicking on “Settings” at the top right of the screen.
 
 == Changelog ==
+= 4.0.41 =
+* Plugin made compatible with Wordpress v6.8.1
+
 = 4.0.40 =
 * Improvements related to Ecommerce enable call
 * Fixed bug related to Products image
