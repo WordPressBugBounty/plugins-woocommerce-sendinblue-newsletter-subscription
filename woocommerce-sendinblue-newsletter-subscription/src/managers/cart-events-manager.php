@@ -561,7 +561,7 @@ class CartEventsManagers
                 'id'            => 'SendinblueWoocommerce/newsletter_opt_in',
                 'label'         => $checkout_label,
                 'location'      => $location,
-                'required'      => true,
+                'required'      => false,
                     'type'     => 'checkbox',
             ),
         );

@@ -168,6 +168,9 @@ If you need some assistance, you can post an issue in the Support tab, or send u
 4. You can access your settings by clicking on “Settings” at the top right of the screen.
 
 == Changelog ==
+= 4.0.42 =
+* Fixed bug related to Checkout Block
+
 = 4.0.41 =
 * Plugin made compatible with Wordpress v6.8.1
 
