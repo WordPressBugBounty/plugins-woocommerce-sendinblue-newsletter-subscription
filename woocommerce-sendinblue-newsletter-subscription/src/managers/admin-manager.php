@@ -100,6 +100,7 @@ class AdminManager
     {
         $is_checkout = is_checkout();
         $is_account_page = is_account_page();
+        $ajax_url = admin_url('admin-ajax.php');
         $output = '<script type="text/javascript">
                     document.body.addEventListener("blur", function(event) {
                         if (event.target.matches("input[type=\'email\']")) {
@@ -122,7 +123,7 @@ class AdminManager
                                 subscription_location = "sign-up";
                             }
                             var xhrobj = new XMLHttpRequest();
-                            xhrobj.open("POST","/wp-admin/admin-ajax.php");
+                            xhrobj.open("POST", "' . esc_url($ajax_url) . '", true);
                             var params = "action=the_ajax_hook&tracking_email=" + encodeURIComponent(event.target.value) + "&subscription_location=" + encodeURIComponent(subscription_location);
                             xhrobj.setRequestHeader("Content-type", "application/x-www-form-urlencoded");
                             xhrobj.send(params);
