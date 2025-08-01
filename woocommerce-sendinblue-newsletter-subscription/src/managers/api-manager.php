@@ -71,6 +71,12 @@ class ApiManager
         add_action('woocommerce_product_set_stock_status', array($products_events_manager, 'product_stock_events'), 10, 1);
         add_action('woocommerce_variation_set_stock_status', array($products_events_manager, 'product_stock_events'), 10, 1);
         add_action('woocommerce_reduce_order_stock', array($products_events_manager, 'product_stock_update_on_order'), 10, 1);
+        add_action('woocommerce_single_product_summary', array($products_events_manager, 'show_back_in_stock_form'), 39, 1);
+        add_action('wp_ajax_sib_back_in_stock', [$products_events_manager, 'sib_back_in_stock_ajax_handler']);
+        add_action('wp_ajax_nopriv_sib_back_in_stock', [$products_events_manager, 'sib_back_in_stock_ajax_handler']);
+        add_action('woocommerce_after_variations_form', [$products_events_manager, 'render_back_in_stock_placeholder']);
+        add_action('wp_ajax_sib_get_back_in_stock_form', [$products_events_manager, 'sib_get_back_in_stock_form']);
+        add_action('wp_ajax_nopriv_sib_get_back_in_stock_form', [$products_events_manager, 'sib_get_back_in_stock_form']);
     }
 
     public function add_conditional_hooks() {

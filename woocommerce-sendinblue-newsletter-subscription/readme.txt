@@ -168,6 +168,9 @@ If you need some assistance, you can post an issue in the Support tab, or send u
 4. You can access your settings by clicking on “Settings” at the top right of the screen.
 
 == Changelog ==
+= 4.0.44 =
+* Plugin enhancements to handle Back-In-Stock subscription functionality
+
 = 4.0.43 =
 * Improvement related to anonymous flow for multi-store
 * Improvement related to guest user api
