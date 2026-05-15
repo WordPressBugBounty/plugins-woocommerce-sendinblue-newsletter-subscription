@@ -6,7 +6,7 @@
  * Author: Brevo
  * Text Domain: woocommerce-sendinblue-newsletter-subscription
  * Domain Path: /languages
- * Version: 4.0.52
+ * Version: 4.0.54
  * Author URI: https://www.brevo.com/?r=wporg
  * Requires at least: 4.3
  * Tested up to: 6.9.1
@@ -47,13 +47,14 @@ define('SENDINBLUE_WC_SETTINGS', 'sendinblue_woocommerce_user_connection_setting
 define('SENDINBLUE_WC_EMAIL_SETTINGS', 'sendinblue_woocommerce_email_options_settings');
 define('SENDINBLUE_WC_VERSION_SENT', 'sendinblue_woocommerce_version_sent');
 define('API_KEY_V3_OPTION_NAME', 'sib_wc_api_key_v3');
-define('SENDINBLUE_WC_PLUGIN_VERSION', '4.0.52');
+define('SENDINBLUE_WC_PLUGIN_VERSION', '4.0.54');
 define('SENDINBLUE_WORDPRESS_SHOP_VERSION', $GLOBALS['wp_version']);
 define('SENDINBLUE_WOOCOMMERCE_UPDATE', 'sendinblue_plugin_update_call_apiv3');
 define('SENDINBLUE_REDIRECT', 'sendinblue_woocommerce_redirect');
 define('SENDINBLUE_WC_ECOMMERCE_REQ', 'sendinblue_woocommerce_ecommerce_requires');
 define('SENDINBLUE_ECOMMERCE_CALLED_TIME', 'ecommerce_called_time');
 define('SENDINBLUE_IS_PLUGIN_INFO_UPDATED', 'sendinblue_is_plugin_info_updated');
+define('SENDINBLUE_SECURITY_BANNER_DISMISSED', 'sendinblue_security_banner_dismissed');
 
 require_once SENDINBLUE_WC_ROOT_PATH . '/src/managers/api-manager.php';
 require_once SENDINBLUE_WC_ROOT_PATH . '/src/managers/admin-manager.php';
@@ -126,6 +127,7 @@ function update_woocom_email_settings()
 
 function sendinblue_woocommerce_load()
 {
+    load_plugin_textdomain( SENDINBLUE_WC_TEXTDOMAIN , false, dirname(plugin_basename(__FILE__)) . '/languages');
     do_action('update_to_sendinblue_new_plugin');
     $api_manager = new ApiManager();
     $api_manager->add_hooks();
@@ -155,7 +157,6 @@ function sendinblue_woocommerce_init()
         wp_redirect(add_query_arg('page', 'sendinblue', admin_url('admin.php')));
     }
 
-    load_plugin_textdomain( SENDINBLUE_WC_TEXTDOMAIN , false, dirname(plugin_basename(__FILE__)) . '/languages');
     update_plugin_information();
     $admin_manager = new AdminManager();
     $admin_manager->run();
@@ -238,9 +239,13 @@ add_action( 'admin_notices', function () {
         return;
     }
 
+    if ( get_option( SENDINBLUE_SECURITY_BANNER_DISMISSED, false ) ) {
+        return;
+    }
+
     if ( $screen && $screen->id === 'plugins') {
         ?>
-        <div class="notice notice-info is-dismissible">
+        <div class="notice notice-info is-dismissible" id="sendinblue-security-banner">
             <p>
                 <strong>Brevo:</strong>
                 Your account may have been compromised. Please check for any suspicious activity in your WordPress admin panel.
@@ -254,17 +259,23 @@ add_action(
     'after_plugin_row_' . plugin_basename( __FILE__ ),
     function () {
         $hasUserConBeenUpdated = get_option( SENDINBLUE_IS_PLUGIN_INFO_UPDATED, false );
-
         if ($hasUserConBeenUpdated != true) {
             return;
         }
 
+        if ( get_option( SENDINBLUE_SECURITY_BANNER_DISMISSED, false ) ) {
+            return;
+        }
+
         global $wp_list_table;
+        if ( ! isset( $wp_list_table ) || ! ( $wp_list_table instanceof WP_List_Table ) ) {
+            return;
+        }
         $colspan = $wp_list_table->get_column_count();
         ?>
         <tr class="plugin-update-tr">
             <td colspan="<?php echo esc_attr( $colspan ); ?>" class="plugin-update colspanchange">
-                <div class="update-message notice inline notice-warning notice-alt is-dismissible">
+                <div class="update-message notice inline notice-warning notice-alt is-dismissible" id="sendinblue-security-banner-row">
                     <p>
                         <strong>Brevo:</strong> Your account may have been compromised. Please check for any suspicious activity in your WordPress admin panel.
                     </p>

@@ -505,7 +505,7 @@ class CartEventsManagers
 
     private function checkout_label($settings)
     {
-        $label = __('Add me to the newsletter', 'wc_sendinblue');
+        $label = __('Subscribe to our newsletter', SENDINBLUE_WC_TEXTDOMAIN);
         if (!empty($settings[SendinblueClient::DISPLAY_OPT_IN_LABEL])) {
             $label = $settings[SendinblueClient::DISPLAY_OPT_IN_LABEL];
         }
@@ -563,8 +563,11 @@ class CartEventsManagers
 
     public function add_optin_order($order_id)
     {
-        $opt_in = isset($_POST['ws_opt_in']) ? true : false;
-        update_post_meta($order_id, 'ws_opt_in', $opt_in);
+        $order = wc_get_order($order_id);
+        if (!$order) return;
+        $opt_in = isset($_POST['ws_opt_in']) ? 'yes' : 'no';
+        $order->update_meta_data('ws_opt_in', $opt_in);
+        $order->save();
     }
 
     public function add_optin_wc_checkout_block() 
@@ -611,7 +614,7 @@ class CartEventsManagers
         }
 
         $doc = new \DOMDocument();
-        $doc->loadHTML($html_tags);
+        $doc->loadHTML($html_tags, LIBXML_NOWARNING | LIBXML_NOERROR);
         $tags = $doc->getElementsByTagName('img');
         foreach ($tags as $tag) {
             return $tag->getAttribute('src');

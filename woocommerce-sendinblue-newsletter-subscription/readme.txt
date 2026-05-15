@@ -167,7 +167,16 @@ If you need some assistance, you can post an issue in the Support tab, or send u
 4. You can access your settings by clicking on “Settings” at the top right of the screen.
 
 == Changelog ==
-=
+
+= 4.0.54 =
+* Resolved an issue where contacts were being automatically unsubscribed after opting in through third-party forms. 
+* Updated default newsletter opt-in checkbox label and added translations for French.
+* Enhanced compatibility with WooCommerce's High-Performance Order Storage (HPOS) in Block Checkout, ensuring more reliable order syncing and contact updates.
+* Plugin performance enhancements.
+
+= 4.0.53 =
+* Technical improvements related to Dismissible banner
+
 = 4.0.52 =
 * Plugin made compatible with Wordpress v6.9.1
 

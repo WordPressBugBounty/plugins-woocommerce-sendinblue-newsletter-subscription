@@ -32,6 +32,10 @@ msgid ""
 "client to send SMS campaign."
 msgstr ""
 
+#: src/managers/cart-events-manager.php:508
+msgid "Subscribe to our newsletter"
+msgstr "Abonnez-vous à notre newsletter"
+
 #: src/views/admin_menus.php:729 src/views/admin_view.php:726
 msgid "for WooCommerce"
 msgstr "pour Woocommerce"

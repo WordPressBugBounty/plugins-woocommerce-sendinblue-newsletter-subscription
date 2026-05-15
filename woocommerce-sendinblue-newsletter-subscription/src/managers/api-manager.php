@@ -722,8 +722,10 @@ class ApiManager
         $opt_in_checked = false;
         $opt_in_enabled = false;
 
-        $oldPluginOptInValue = get_post_meta($id, 'ws_opt_in', true);
-        $newPluginOptInValue = $order->get_meta('_wc_other/SendinblueWoocommerce/newsletter_opt_in'); //new optin field for checkout blocks
+        $wsOptIn = $order->get_meta('ws_opt_in');
+        $oldPluginOptInValue = $wsOptIn === 'yes' || $wsOptIn === '1';
+        $newPluginOptInValue = $order->get_meta('_wc_other/SendinblueWoocommerce/newsletter_opt_in')
+            ?: $order->get_meta('_wc_order/SendinblueWoocommerce/newsletter_opt_in');
 
         if (!empty($settings[SendinblueClient::IS_DISPLAY_OPT_IN_ENABLED])) {
             $opt_in_enabled = true;

@@ -151,6 +151,16 @@ class ProductsManager
             }
         }
 
+        $brands = get_the_terms($product->get_id(), 'product_brand');
+        $data['brands'] = [];
+        if (!empty($brands) && !is_wp_error($brands)) {
+            foreach ($brands as $brand) {
+                $data['brands'][] = [
+                    'name' => $brand->name
+                ];
+            }
+        }
+
         if (!empty($product->get_image_id())) {
             $data['images'] = [];
             $data['main_image_src'] = '';
@@ -353,8 +363,12 @@ class ProductsManager
     }
 
 
-    public function render_back_in_stock_placeholder() 
+    public function render_back_in_stock_placeholder()
     {
+        $settings = $this->api_manager->get_settings();
+        if (empty($settings[SendinblueClient::IS_BACK_IN_STOCK_ENABLED])) {
+            return;
+        }
         ?>
         <div id="sib-back-in-stock-form-placeholder"></div>
         <script>
