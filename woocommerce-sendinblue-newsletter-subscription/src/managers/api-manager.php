@@ -148,9 +148,10 @@ class ApiManager
             array(
                 self::ROUTE_PATH       => '/orders/count',
                 self::ROUTE_METHODS    => 'GET',
-                self::ROUTE_CALLBACK   => function () {
-                    return $this->modify_response($this->get_orders_count());
-                }
+                self::ROUTE_CALLBACK   => function ($request) {
+                    return $this->modify_response($this->get_orders_count($request));
+                },
+                'args' => $this->date_param_args(),
             ),
             array(
                 self::ROUTE_PATH       => '/categories/count',
@@ -162,16 +163,18 @@ class ApiManager
             array(
                 self::ROUTE_PATH       => '/products/count',
                 self::ROUTE_METHODS    => 'GET',
-                self::ROUTE_CALLBACK   => function () {
-                    return $this->modify_response($this->get_products_count());
-                }
+                self::ROUTE_CALLBACK   => function ($request) {
+                    return $this->modify_response($this->get_products_count($request));
+                },
+                'args' => $this->date_param_args(),
             ),
             array(
                 self::ROUTE_PATH       => '/customers/count',
                 self::ROUTE_METHODS    => 'GET',
-                self::ROUTE_CALLBACK   => function () {
-                    return $this->modify_response($this->get_customers_count());
-                }
+                self::ROUTE_CALLBACK   => function ($request) {
+                    return $this->modify_response($this->get_customers_count($request));
+                },
+                'args' => $this->date_param_args(),
             ),
             array(
                 self::ROUTE_PATH       => '/product/update',
@@ -313,10 +316,14 @@ class ApiManager
         }
 
         $arguments = array(
-            self::ROUTE_METHODS    => $methods,
-            self::ROUTE_CALLBACK   => $callback,
-            self::ROUTE_PERMISSION_CALLBACK   => array($this, 'validate_api_key')
+            self::ROUTE_METHODS             => $methods,
+            self::ROUTE_CALLBACK            => $callback,
+            self::ROUTE_PERMISSION_CALLBACK => array($this, 'validate_api_key')
         );
+
+        if (!empty($route['args'])) {
+            $arguments['args'] = $route['args'];
+        }
 
         register_rest_route(self::API_NAMESPACE, $path, $arguments);
     }
@@ -332,20 +339,26 @@ class ApiManager
             ), 200);
     }
 
-    private function get_orders_count()
+    private function get_orders_count($request)
     {
         try {
-            $orders = new WP_Query(
-                array(
-                    'post_type' => 'shop_order',
-                    'post_status' => 'any',
-                    'posts_per_page' => -1,
-                )
+            $args = array(
+                'fields'         => 'ids',
+                'post_type'      => 'shop_order',
+                'post_status'    => 'any',
+                'posts_per_page' => 1,
             );
+
+            $date_query = $this->build_date_query($request);
+            if (!empty($date_query)) {
+                $args['date_query'] = $date_query;
+            }
+
+            $orders = new WP_Query($args);
 
             return new WP_REST_Response(
                 array(
-                    'count' => (int) $orders->post_count
+                    'count' => (int) $orders->found_posts
                 ), 200);
         }
         catch (\Throwable $t) {
@@ -354,7 +367,6 @@ class ApiManager
                     'message' => $t->getMessage(), " in file: ", $t->getFile(), "at line no:", $t->getLine()
                 ), 500);
         }
-        
     }
 
     private function get_categories_count()
@@ -378,18 +390,24 @@ class ApiManager
         }
     }
 
-    private function get_products_count()
+    private function get_products_count($request)
     {
         try {
-            $products = new WP_Query(
-                array(
-                    'fields'      => 'ids',
-                    'post_type'   => 'product',
-                    'post_status' => 'publish',
-                    'meta_query'  => array(),
-                )
+            $args = array(
+                'fields'         => 'ids',
+                'post_type'      => 'product',
+                'post_status'    => 'publish',
+                'posts_per_page' => 1,
+                'meta_query'     => array(),
             );
-    
+
+            $date_query = $this->build_date_query($request);
+            if (!empty($date_query)) {
+                $args['date_query'] = $date_query;
+            }
+
+            $products = new WP_Query($args);
+
             return new WP_REST_Response(
                 array(
                     'count' => (int) $products->found_posts
@@ -402,15 +420,26 @@ class ApiManager
                 ), 500);
         }
     }
-    private function get_customers_count()
+    private function get_customers_count($request)
     {
         try {
-            $customer_data = count_users();
-            $customer_count = isset($customer_data['avail_roles']['customer'])? $customer_data['avail_roles']['customer'] : 0;
+            $args = array(
+                'role'        => 'customer',
+                'count_total' => true,
+                'number'      => 1,
+                'fields'      => 'ID',
+            );
+
+            $date_query = $this->build_date_query($request);
+            if (!empty($date_query)) {
+                $args['date_query'] = $date_query;
+            }
+
+            $query = new \WP_User_Query($args);
 
             return new WP_REST_Response(
                 array(
-                    'count' => $customer_count
+                    'count' => $query->get_total()
                 ), 200);
         }
         catch (\Throwable $t) {
@@ -420,6 +449,49 @@ class ApiManager
                 ), 500);
         }
     }
+    private function date_param_args()
+    {
+        $validate = function ($value) {
+            if (!empty($value) && \DateTime::createFromFormat('Y-m-d\TH:i:s', $value) === false) {
+                return new WP_Error('invalid_date', 'Expected ISO 8601 format: Y-m-d\TH:i:s');
+            }
+            return true;
+        };
+
+        return [
+            'after' => [
+                'type'              => 'string',
+                'sanitize_callback' => 'sanitize_text_field',
+                'validate_callback' => $validate,
+            ],
+            'before' => [
+                'type'              => 'string',
+                'sanitize_callback' => 'sanitize_text_field',
+                'validate_callback' => $validate,
+            ],
+        ];
+    }
+
+    private function build_date_query(\WP_REST_Request $request)
+    {
+        $after  = $request->get_param('after') ?: null;
+        $before = $request->get_param('before') ?: null;
+
+        if (!$after && !$before) {
+            return [];
+        }
+
+        $entry = ['inclusive' => true];
+        if ($after) {
+            $entry['after'] = $after;
+        }
+        if ($before) {
+            $entry['before'] = $before;
+        }
+
+        return [$entry];
+    }
+
     private function get_product_update($request)
     {
         try {

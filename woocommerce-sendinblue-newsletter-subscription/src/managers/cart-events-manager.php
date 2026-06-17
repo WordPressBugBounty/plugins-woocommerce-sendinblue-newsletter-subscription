@@ -419,7 +419,7 @@ class CartEventsManagers
             $item['price_parsed'] = self::parsePrice($item['price']);
             $item['tax_parsed'] = self::parsePrice($item['tax']);
             $item['price_taxinc_parsed'] = self::parsePrice($item['price_taxinc']);
-            $item['quantity'] = (!empty($orderitem->get_quantity()) && is_numeric($orderitem->get_quantity()) && !is_nan($orderitem->get_quantity())) ? (int) $orderitem->get_quantity() : '';
+            $item['quantity'] = (!empty($orderitem->get_quantity()) && is_numeric($orderitem->get_quantity()) && !is_nan($orderitem->get_quantity())) ? (float) $orderitem->get_quantity() : '';
             $product = wc_get_product($orderitem['product_id']);
             $image_id = $variation->get_image_id() ? $variation->get_image_id() : $product->get_image_id();
             $item['image'] = wp_get_attachment_image_url($image_id, 'full');

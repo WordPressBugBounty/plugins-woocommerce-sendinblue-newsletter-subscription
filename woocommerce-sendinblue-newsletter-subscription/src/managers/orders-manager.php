@@ -159,7 +159,7 @@ class OrdersManager
                 'product_id' => $item->get_product_id(),
                 'variation_id' => $item->get_variation_id(),
                 'variant_title' => $item->get_name(),
-                'quantity' => $item->get_quantity(),
+                'quantity' => (float) $item->get_quantity(),
                 'total' => $item->get_total(),
                 'subtotal' => $item->get_subtotal()
             ];
