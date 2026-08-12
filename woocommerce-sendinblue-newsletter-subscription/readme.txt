@@ -168,6 +168,9 @@ If you need some assistance, you can post an issue in the Support tab, or send u
 
 == Changelog ==
 
+= 4.0.56 =
+* Fixed an issue where visitors could be automatically added as contacts in Brevo without explicitly subscribing. Contacts are now only added when a visitor intentionally shares their details.
+
 = 4.0.55 =
 * Plugin Update Event support for multistore.
 * Decimal quantity support in order sync.

@@ -200,8 +200,6 @@ class AdminManager
             return;
         }
 
-        $emailId = $this->cart_events_manager->get_email_id();
-
         $site_url = get_site_url();
         $plugin_dir = 'woocommerce-sendinblue-newsletter-subscription';
         $customDomain = $site_url . "\/wp-content\/plugins\/" . $plugin_dir . "\/";
@@ -212,11 +210,8 @@ class AdminManager
             window.Brevo = window.Brevo || [];
             window.Brevo.push(["init", {
                 client_key: "' . $settings[SendinblueClient::MA_KEY] . '",
-                email_id: "' . $emailId . '",
                 push: {
-                    customDomain: "' . $customDomain . '"' .
-                    (!empty($emailId) ? ',
-                    userId: "' . $emailId . '"' : '') . '
+                    customDomain: "' . $customDomain . '"
                 }
             }]);
         </script>';
