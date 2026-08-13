@@ -397,6 +397,89 @@ class ProductsManager
         </script>
         <?php
     }
+
+    /**
+     * Auto-injects the back-in-stock "Notify me" form on single product pages,
+     * client-side, so it appears even when a page builder (e.g. an Elementor
+     * Single Product template) replaces WooCommerce's product template and the
+     * `woocommerce_single_product_summary` hook never fires — with no manual
+     * setup required from the merchant.
+     *
+     * Hooked on wp_footer (fires on every front-end page regardless of theme or
+     * builder). No-ops when the form is already present (rendered server-side on
+     * classic/block themes) via the #sib-back-in-stock-form guard, so it never
+     * duplicates. Scoped to simple, out-of-stock products with back-in-stock
+     * enabled. The form is placed immediately after the product price so it
+     * matches the position it renders in on classic/block themes, falling back
+     * to the product summary container.
+     */
+    public function auto_inject_back_in_stock_form()
+    {
+        if (!function_exists('is_product') || !is_product()) {
+            return;
+        }
+
+        $settings = $this->api_manager->get_settings();
+        if (empty($settings[SendinblueClient::IS_BACK_IN_STOCK_ENABLED])) {
+            return;
+        }
+
+        $product = wc_get_product(get_queried_object_id());
+        if (!$product instanceof \WC_Product || $product->is_type('variable') || $product->is_in_stock()) {
+            return;
+        }
+
+        $ajax_url   = admin_url('admin-ajax.php');
+        $product_id = (int) $product->get_id();
+        ?>
+        <script type="text/javascript">
+        (function () {
+            function sibAutoInjectBackInStock($) {
+                // Already rendered server-side (classic/block themes) — avoid duplicates.
+                if (document.getElementById('sib-back-in-stock-form')) {
+                    return;
+                }
+                // Anchor to the product price so the form appears right below it,
+                // matching where it renders on classic/block themes.
+                var anchorSelectors = [
+                    '.elementor-widget-woocommerce-product-price',
+                    '.summary .price',
+                    '.entry-summary .price'
+                ];
+                var $anchor = $();
+                for (var i = 0; i < anchorSelectors.length; i++) {
+                    $anchor = $(anchorSelectors[i]).first();
+                    if ($anchor.length) { break; }
+                }
+                var appendMode = false;
+                if (!$anchor.length) {
+                    $anchor = $('.entry-summary, .summary, div.product').first();
+                    appendMode = true;
+                    if (!$anchor.length) { return; }
+                }
+                $.post('<?php echo esc_url($ajax_url); ?>', {
+                    action: 'sib_get_back_in_stock_form',
+                    product_id: <?php echo $product_id; ?>
+                }, function (response) {
+                    if (!response || !response.success || !response.data ||
+                        document.getElementById('sib-back-in-stock-form')) {
+                        return;
+                    }
+                    // jQuery insertion executes the inline init script in the returned markup.
+                    if (appendMode) {
+                        $anchor.append(response.data.html);
+                    } else {
+                        $anchor.after(response.data.html);
+                    }
+                });
+            }
+            if (window.jQuery) {
+                jQuery(function ($) { sibAutoInjectBackInStock($); });
+            }
+        })();
+        </script>
+        <?php
+    }
 	
     public function sib_back_in_stock_ajax_handler() 
     {

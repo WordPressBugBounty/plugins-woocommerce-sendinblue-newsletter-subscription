@@ -77,6 +77,7 @@ class ApiManager
         add_action('woocommerce_after_variations_form', [$products_events_manager, 'render_back_in_stock_placeholder']);
         add_action('wp_ajax_sib_get_back_in_stock_form', [$products_events_manager, 'sib_get_back_in_stock_form']);
         add_action('wp_ajax_nopriv_sib_get_back_in_stock_form', [$products_events_manager, 'sib_get_back_in_stock_form']);
+        add_action('wp_footer', array($products_events_manager, 'auto_inject_back_in_stock_form'));
     }
 
     public function add_conditional_hooks() {

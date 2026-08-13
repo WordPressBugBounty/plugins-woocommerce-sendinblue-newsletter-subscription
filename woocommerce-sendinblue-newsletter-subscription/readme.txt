@@ -168,6 +168,9 @@ If you need some assistance, you can post an issue in the Support tab, or send u
 
 == Changelog ==
 
+= 4.0.57 =
+* Fix for Brevo's Back-in-stock "Notify me" form not rendering on Elementor product pages.
+
 = 4.0.56 =
 * Fixed an issue where visitors could be automatically added as contacts in Brevo without explicitly subscribing. Contacts are now only added when a visitor intentionally shares their details.
 
