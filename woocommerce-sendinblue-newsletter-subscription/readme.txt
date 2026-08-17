@@ -2,7 +2,7 @@
 Contributors: neeraj_slit
 Tags: email marketing, marketing automation, newsletter, SMS, WooCommerce
 Requires at least: 4.3.1
-Tested up to: 6.9.1
+Tested up to: 7.1
 Requires PHP: 5.6
 Stable tag: trunk
 License: GNU General Public License v2.0 or later
@@ -167,6 +167,9 @@ If you need some assistance, you can post an issue in the Support tab, or send u
 4. You can access your settings by clicking on “Settings” at the top right of the screen.
 
 == Changelog ==
+
+= 4.0.58 =
+* Plugin made compatible with WordPress v7.1
 
 = 4.0.57 =
 * Fix for Brevo's Back-in-stock "Notify me" form not rendering on Elementor product pages.
