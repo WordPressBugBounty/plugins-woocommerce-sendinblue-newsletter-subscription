@@ -140,8 +140,15 @@ class AdminManager
     
     public function brevo_hook_javascript_footer()
     {
+        // ECOMM-197: capture the email entered on blur ONLY on the checkout page.
+        // Previously this listener was printed on every NON-checkout page and captured the
+        // value of ANY input[type=email] (contact/newsletter forms) on blur, before any form
+        // submission or consent — creating blocklisted contacts without consent (GDPR; see
+        // L3I-144849 / L3I-145109). Restricting to checkout keeps abandoned-cart working
+        // (the shopper's checkout email is still captured and stored as blocklisted), while
+        // the final subscription status is resolved on order completion via the unified flow.
         $is_checkout = is_checkout();
-        if ($is_checkout) {
+        if (!$is_checkout) {
             return;
         }
         $is_account_page = is_account_page();

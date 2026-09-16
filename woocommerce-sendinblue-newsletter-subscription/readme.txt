@@ -168,6 +168,9 @@ If you need some assistance, you can post an issue in the Support tab, or send u
 
 == Changelog ==
 
+= 4.0.59 =
+* Fixed an issue where visitors could be automatically added as contacts in Brevo when filling out any form field with input type as email. Contacts are now only added when a visitor intentionally shares their details.
+
 = 4.0.58 =
 * Plugin made compatible with WordPress v7.1
 
