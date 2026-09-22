@@ -12,6 +12,7 @@ use WP_REST_Response;
 require_once SENDINBLUE_WC_ROOT_PATH . '/src/clients/automation-client.php';
 require_once SENDINBLUE_WC_ROOT_PATH . '/src/managers/api-manager.php';
 require_once SENDINBLUE_WC_ROOT_PATH . '/src/clients/sendinblue-client.php';
+require_once SENDINBLUE_WC_ROOT_PATH . '/src/managers/logging-manager.php';
 
 /**
  * Class CartEventsManagers
@@ -40,6 +41,12 @@ class CartEventsManagers
         $tracking_email = sanitize_text_field($_POST['tracking_email']);
         $email_id = $this->get_email_id($tracking_email);
         $subscription_location = isset($_POST['subscription_location']) ? sanitize_text_field($_POST['subscription_location']) : '';
+
+        LoggingManager::instance()->info('contact', 'anonymous contact captured', array(
+            'email'                 => $email_id,
+            'subscription_location' => $subscription_location,
+        ));
+
         $client = new SendinblueClient();
         $client->eventsSync(SendinblueClient::CONTACT_CREATED, [
             "subscribed"=>"false",
@@ -51,12 +58,17 @@ class CartEventsManagers
 
     public function the_action_function()
     {
+        $logger = LoggingManager::instance();
 
         if (!isset($_POST['tracking_email']) || empty($_POST['tracking_email'])) {
+            $logger->debug('cart', 'cart tracking skipped: no tracking email posted');
+
             return false;
         }
 
         if (!(WC()->cart)) {
+            $logger->debug('cart', 'cart tracking skipped: no cart on this request');
+
             return false;
         }
 
@@ -66,6 +78,13 @@ class CartEventsManagers
             empty($settings[SendinblueClient::MA_KEY]) ||
             empty($settings[SendinblueClient::IS_ABANDONED_CART_ENABLED])
         ) {
+            // The two settings behind every "abandoned cart is not working"
+            // report. Presence only — the MA key itself is a credential.
+            $logger->debug('cart', 'cart tracking skipped: not configured', array(
+                'have_ma_key'            => !empty($settings[SendinblueClient::MA_KEY]),
+                'abandoned_cart_enabled' => !empty($settings[SendinblueClient::IS_ABANDONED_CART_ENABLED]),
+            ));
+
             return false;
         }
 
@@ -75,6 +94,12 @@ class CartEventsManagers
         $email_id = $this->get_email_id($tracking_email);
 
         if (empty($tracking_email) || empty($email_id)) {
+            // get_email_id() deliberately returns empty for administrators, so
+            // this fires when a shop owner tests the feature on their own login.
+            $logger->debug('cart', 'cart tracking skipped: no usable email', array(
+                'is_administrator' => $this->is_administrator(),
+            ));
+
             return false;
         }
 
@@ -95,8 +120,30 @@ class CartEventsManagers
                 $tracking_event_data['event'] = 'cart_updated';
             }
 
+            if (isset($tracking_event_data['event'])) {
+                $event_id = 'evt_' . wp_generate_password(12, false, false);
+                $tracking_event_data['event_id'] = $event_id;
+                LoggingManager::instance()->debug('cart', 'event built', array(
+                    'event'    => $tracking_event_data['event'],
+                    'event_id' => $event_id,
+                ));
+            }
+
+            // Per-cart-mutation hot path — buffered into the request summary.
+            LoggingManager::instance()->debug('cart', 'cart tracking event built', array(
+                'event' => isset($tracking_event_data['event']) ? $tracking_event_data['event'] : null,
+                'email' => $email_id,
+                'items' => isset($tracking_event_data['eventdata']['data']['items'])
+                    ? count($tracking_event_data['eventdata']['data']['items'])
+                    : 0,
+            ));
+
             $this->automation_manager->send($tracking_event_data, $ma_key);
         } catch (Exception $e) {
+            LoggingManager::instance()->error('cart', 'cart tracking threw', array(
+                'error' => $e->getMessage(),
+            ));
+
             return false;
         }
         return true;
@@ -184,6 +231,15 @@ class CartEventsManagers
             return $cart_fragments;
         }
 
+        $event_id = 'evt_' . wp_generate_password(12, false, false);
+        $tracking_event_data['event_id'] = $event_id;
+        LoggingManager::instance()->debug('cart', 'event built', array(
+            'event'    => $tracking_event_data['event'],
+            'event_id' => $event_id,
+        ));
+
+        LoggingManager::instance()->info('cart', 'cart emptied');
+
         $this->automation_manager->send($tracking_event_data, $ma_key);
         return $cart_fragments;
     }
@@ -208,6 +264,10 @@ class CartEventsManagers
         $ma_key = $this->get_ma_key();
 
         if (empty($this->get_email_id()) || empty($ma_key)) {
+            LoggingManager::instance()->debug('cart', 'cart update skipped', array(
+                'reason' => empty($ma_key) ? 'no ma key' : 'no email id',
+            ));
+
             return $cart_updated;
         }
 
@@ -217,9 +277,24 @@ class CartEventsManagers
         if (!empty(WC()->cart->cart_contents)) {
             $tracking_event_data = $this->get_tracking_data_cart($cart_id);
             $tracking_event_data['event'] = 'cart_updated';
+
+            $event_id = 'evt_' . wp_generate_password(12, false, false);
+            $tracking_event_data['event_id'] = $event_id;
+            LoggingManager::instance()->debug('cart', 'event built', array(
+                'event'    => $tracking_event_data['event'],
+                'event_id' => $event_id,
+            ));
         } else {
+            LoggingManager::instance()->debug('cart', 'cart update skipped', array('reason' => 'cart empty'));
+
             return $cart_updated;
         }
+
+        // Per-cart-mutation hot path — buffered into the request summary.
+        LoggingManager::instance()->debug('cart', 'cart updated', array(
+            'items' => count(WC()->cart->cart_contents),
+        ));
+
         $this->automation_manager->send($tracking_event_data, $ma_key);
         return $cart_updated;
     }
@@ -227,20 +302,51 @@ class CartEventsManagers
     public function ws_checkout_completed($order_id)
     {
         $ma_key = $this->get_ma_key();
+        $logger = LoggingManager::instance();
 
         if (empty($ma_key)) {
+            $logger->debug('cart', 'order completed event skipped: abandoned cart tracking off', array(
+                'order_id' => (int) $order_id,
+            ));
+
             return;
         }
 
-        if (!get_post_meta($order_id, '_thankyou_action_done', true)) {
-            $order = wc_get_order($order_id);
-            $order->update_meta_data('_thankyou_action_done', true, $order_id);
-            $order->save();
-            $tracking_event_data = $this->get_tracking_data_order($order_id);
-            if (!empty($tracking_event_data['email'])) {
-                $this->automation_manager->send($tracking_event_data, $ma_key);
-            }
+        if (get_post_meta($order_id, '_thankyou_action_done', true)) {
+            // The thank-you page can be reloaded any number of times; this flag
+            // is what stops a duplicate order event on each refresh.
+            $logger->debug('cart', 'order completed event skipped: already sent', array(
+                'order_id' => (int) $order_id,
+            ));
+
+            return;
         }
+
+        $order = wc_get_order($order_id);
+        if (!$order) {
+            $logger->log(LoggingManager::LEVEL_ERROR, 'order', 'checkout completed but order not loadable', array(
+                'order_id' => $order_id,
+            ));
+            return;
+        }
+        $order->update_meta_data('_thankyou_action_done', true);
+        $order->save();
+        $tracking_event_data = $this->get_tracking_data_order($order_id);
+
+        if (empty($tracking_event_data['email'])) {
+            $logger->warn('cart', 'order completed event dropped: no email on order', array(
+                'order_id' => (int) $order_id,
+            ));
+
+            return;
+        }
+
+        $logger->info('cart', 'order completed event sent', array(
+            'order_id' => (int) $order_id,
+            'email'    => $tracking_event_data['email'],
+        ));
+
+        $this->automation_manager->send($tracking_event_data, $ma_key);
     }
 
     public function get_wc_cart_id()
@@ -494,6 +600,13 @@ class CartEventsManagers
             ),
         );
 
+        $event_id = 'evt_' . wp_generate_password(12, false, false);
+        $data_track['event_id'] = $event_id;
+        LoggingManager::instance()->debug('cart', 'event built', array(
+            'event'    => $data_track['event'],
+            'event_id' => $event_id,
+        ));
+
         return $data_track;
     }
 
@@ -568,6 +681,14 @@ class CartEventsManagers
         $opt_in = isset($_POST['ws_opt_in']) ? 'yes' : 'no';
         $order->update_meta_data('ws_opt_in', $opt_in);
         $order->save();
+
+        // What the shopper actually ticked at checkout. Decides later whether
+        // the contact is synced as subscribed, so it is worth capturing at the
+        // moment it is recorded rather than inferring it afterwards.
+        LoggingManager::instance()->info('contact', 'checkout opt-in recorded', array(
+            'order_id' => (int) $order_id,
+            'opt_in'   => $opt_in,
+        ));
     }
 
     public function add_optin_wc_checkout_block() 

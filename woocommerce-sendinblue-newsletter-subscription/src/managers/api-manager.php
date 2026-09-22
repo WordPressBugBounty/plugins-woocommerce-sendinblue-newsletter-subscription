@@ -19,6 +19,7 @@ require_once SENDINBLUE_WC_ROOT_PATH . '/src/managers/category-manager.php';
 require_once SENDINBLUE_WC_ROOT_PATH . '/src/managers/orders-manager.php';
 require_once SENDINBLUE_WC_ROOT_PATH . '/src/models/api-schema.php';
 require_once SENDINBLUE_WC_ROOT_PATH . '/src/clients/sendinblue-client.php';
+require_once SENDINBLUE_WC_ROOT_PATH . '/src/managers/logging-manager.php';
 
 /**
  * Class ApiManager
@@ -78,6 +79,7 @@ class ApiManager
         add_action('wp_ajax_sib_get_back_in_stock_form', [$products_events_manager, 'sib_get_back_in_stock_form']);
         add_action('wp_ajax_nopriv_sib_get_back_in_stock_form', [$products_events_manager, 'sib_get_back_in_stock_form']);
         add_action('wp_footer', array($products_events_manager, 'auto_inject_back_in_stock_form'));
+        $this->add_rest_dispatch_logging();
     }
 
     public function add_conditional_hooks() {
@@ -231,6 +233,32 @@ class ApiManager
                     ],
                 ],
             ),
+            array(
+                self::ROUTE_PATH       => '/logs',
+                self::ROUTE_METHODS    => 'GET',
+                self::ROUTE_CALLBACK   => function ($request) {
+                    return $this->modify_response($this->get_logs($request));
+                },
+                'args' => [
+                    'list' => [
+                        'type' => 'boolean',
+                        'default' => false,
+                    ],
+                    'file' => [
+                        'type' => 'string',
+                    ],
+                    'offset' => [
+                        'type' => 'integer',
+                        'default' => 0,
+                        'sanitize_callback' => 'absint',
+                    ],
+                    'max_bytes' => [
+                        'type' => 'integer',
+                        'default' => 0,
+                        'sanitize_callback' => 'absint',
+                    ],
+                ],
+            ),
         );
 
         foreach ($routes as $route) {
@@ -318,7 +346,9 @@ class ApiManager
 
         $arguments = array(
             self::ROUTE_METHODS             => $methods,
-            self::ROUTE_CALLBACK            => $callback,
+            self::ROUTE_CALLBACK            => $path === '/logs'
+                ? $callback                                   // reading logs must not write logs
+                : $this->instrument_route($path, $callback),
             self::ROUTE_PERMISSION_CALLBACK => array($this, 'validate_api_key')
         );
 
@@ -329,8 +359,192 @@ class ApiManager
         register_rest_route(self::API_NAMESPACE, $path, $arguments);
     }
 
+    /**
+     * Wrap a route callback so every call Brevo makes into the shop leaves a
+     * record of what it asked for and what it got back.
+     *
+     * Done here rather than inside each of the eighteen route closures: one
+     * place to change, and a route added later is instrumented by default
+     * instead of by whoever remembers.
+     *
+     * @param string   $path
+     * @param callable $callback
+     * @return callable
+     */
+    private function instrument_route($path, $callback)
+    {
+        return function ($request) use ($path, $callback) {
+            $logger = LoggingManager::instance();
+
+            if (!$logger->is_enabled()) {
+                return $callback($request);
+            }
+
+            $method = is_object($request) && method_exists($request, 'get_method')
+                ? $request->get_method()
+                : '';
+            $started = microtime(true);
+
+            try {
+                $response = $callback($request);
+            } catch (\Throwable $t) {
+                // Rethrown: instrumentation observes, it does not swallow.
+                $logger->error('rest', 'route threw', array(
+                    'path'   => $path,
+                    'method' => $method,
+                    'ms'     => (int) round((microtime(true) - $started) * 1000),
+                    'error'  => $t->getMessage(),
+                ));
+
+                throw $t;
+            }
+
+            // A WP_Error return is the other REST failure path besides an
+            // exception: the dispatcher turns it into an error response after
+            // this closure returns, so without this branch a failed request
+            // would leave no line at all.
+            if (is_wp_error($response)) {
+                $error_data = $response->get_error_data();
+                $logger->error('rest', 'route failed', array(
+                    'path'   => $path,
+                    'method' => $method,
+                    'status' => is_array($error_data) && isset($error_data[self::HTTP_STATUS])
+                        ? (int) $error_data[self::HTTP_STATUS]
+                        : 500,
+                    'ms'     => (int) round((microtime(true) - $started) * 1000),
+                    'error'  => $response->get_error_message(),
+                ));
+
+                return $response;
+            }
+
+            $status = is_object($response) && method_exists($response, 'get_status')
+                ? (int) $response->get_status()
+                : 0;
+
+            // Success is silent — the outbound http record and the request
+            // summary already tell the story. Only failures earn a line.
+            if ($status >= 400) {
+                $data = $response instanceof \WP_REST_Response ? $response->get_data() : null;
+                $logger->error('rest', 'route failed', array(
+                    'path'     => $path,
+                    'method'   => $method,
+                    'status'   => $status,
+                    'ms'       => (int) round((microtime(true) - $started) * 1000),
+                    'response' => ($status >= 500 && is_array($data))
+                        ? substr(wp_json_encode($data), 0, 2048)
+                        : null,
+                ));
+            }
+
+            return $response;
+        };
+    }
+
+    /**
+     * Record WooCommerce's own REST traffic.
+     *
+     * The initial sync of contacts, products and orders is pulled by Brevo
+     * from WooCommerce core routes (wc/v3/customers and friends), which never
+     * enter this plugin's PHP. Instrumenting only our own call sites therefore
+     * leaves the single most commonly reported operation — "my contacts did
+     * not sync" — completely invisible. This filter closes that gap without
+     * touching WooCommerce.
+     *
+     * Kept deliberately quiet: a successful pull is one buffered note (one
+     * flushed line per request), never a record per dispatch. A full sync is
+     * hundreds of pulls; anything louder fills the size cap with routine.
+     *
+     * @return void
+     */
+    public function add_rest_dispatch_logging()
+    {
+        add_filter('rest_request_after_callbacks', array($this, 'log_rest_result'), 10, 3);
+    }
+
+    /**
+     * @param \WP_REST_Response|\WP_HTTP_Response|\WP_Error $response
+     * @param array                                        $handler
+     * @param \WP_REST_Request                             $request
+     * @return mixed Untouched — this is an observer, not a filter.
+     */
+    public function log_rest_result($response, $handler, $request)
+    {
+        $route = $this->loggable_rest_route($request);
+        if ($route === null) {
+            return $response;
+        }
+
+        $logger = LoggingManager::instance();
+
+        if (is_wp_error($response)) {
+            $logger->error('wc', 'rest request failed', array(
+                'route' => $route,
+                'code'  => $response->get_error_code(),
+            ));
+
+            return $response;
+        }
+
+        $status = is_object($response) && method_exists($response, 'get_status')
+            ? (int) $response->get_status()
+            : 0;
+        $method = method_exists($request, 'get_method') ? $request->get_method() : '';
+
+        // Row count is the answer to "did the sync return anything?", which is
+        // the question behind most sync tickets. The rows themselves are not
+        // logged — they are the merchant's customer data.
+        $data = is_object($response) && method_exists($response, 'get_data') ? $response->get_data() : null;
+
+        if ($status >= 400) {
+            $logger->error('wc', 'rest request failed', array(
+                'route'  => $route,
+                'method' => $method,
+                'status' => $status,
+            ));
+
+            return $response;
+        }
+
+        // Only WooCommerce data pulls earn a note. The plugin's own routes are
+        // polled on a schedule (product/update, counts, …) — noting those
+        // writes the same routine line all day, and the handlers that do
+        // something meaningful already log for themselves.
+        if (strpos($route, '/wc/') === 0) {
+            $logger->note(
+                'wc',
+                trim($method . ' ' . $route) . ' ' . $status . (is_array($data) ? ' rows=' . count($data) : '')
+            );
+        }
+
+        return $response;
+    }
+
+    /**
+     * Which routes are worth a record: WooCommerce core (what Brevo pulls from)
+     * and our own namespace. Everything else on the site is somebody else's
+     * plugin and none of our business.
+     *
+     * @param \WP_REST_Request $request
+     * @return string|null
+     */
+    private function loggable_rest_route($request)
+    {
+        if (!LoggingManager::instance()->is_enabled() || !is_object($request) || !method_exists($request, 'get_route')) {
+            return null;
+        }
+
+        $route = (string) $request->get_route();
+
+        if (strpos($route, '/wc/') === 0 || strpos($route, '/' . self::API_NAMESPACE . '/') === 0) {
+            return $route;
+        }
+
+        return null;
+    }
+
     private function get_plugin_settings()
-    {      
+    {
         return new WP_REST_Response(
             array(
                 'settings' => $this->get_settings(),
@@ -338,6 +552,99 @@ class ApiManager
                 'user_connection_id' => get_option(SENDINBLUE_WC_USER_CONNECTION_ID, null),
                 'is_plugin_info_updated' => get_option(SENDINBLUE_IS_PLUGIN_INFO_UPDATED, null),
             ), 200);
+    }
+
+    /**
+     * Serve captured log content to Brevo's backend.
+     *
+     * Auth (WooCommerce API keys) is applied by register_route() like every
+     * other route. All path handling lives in LoggingManager — this method
+     * never assembles a filesystem path from request input.
+     *
+     * @param \WP_REST_Request $request
+     * @return WP_REST_Response
+     */
+    private function get_logs($request)
+    {
+        $logger = LoggingManager::instance();
+
+        // List mode (?list=1): logging status plus the files on disk. Shape
+        // matches iPluginLogs::getLogs() ({enabled, expires_at, files}). Off
+        // is a normal 200 with enabled=false — but files still lists whatever
+        // the retention sweep has not deleted yet, so the fetching side can
+        // see that a lapsed window left something worth reading.
+        if ($request->get_param('list')) {
+            $enabled = $logger->is_enabled();
+            $status = $logger->get_status();
+
+            return new WP_REST_Response(array(
+                'enabled'    => $enabled,
+                'expires_at' => $enabled ? (int) get_option(SENDINBLUE_WC_LOGS_EXPIRES, 0) : 0,
+                'files'      => array_values($logger->list_files()),
+                // 'ok' when healthy; 'disabled' / 'mkdir_failed' / 'not_writable'
+                // / 'uploads_unavailable' / 'unknown' otherwise — so "off" and
+                // "broken" stop being indistinguishable. Never includes the
+                // directory path (get_status()['directory'] is deliberately
+                // omitted, it carries the site hash).
+                //
+                // get_status() degrades to an empty array (via safe()) if
+                // do_get_status() throws; empty/keyless is reported as
+                // 'unknown' rather than silently collapsing to 'ok'.
+                'status'     => (!is_array($status) || empty($status))
+                    ? 'unknown'
+                    : (isset($status['reason']) && $status['reason'] !== null
+                        ? (string) $status['reason']
+                        : 'ok'),
+            ), 200);
+        }
+
+        // Read mode serves an active window OR files a lapsed one left behind:
+        // a merchant reproduces on day 1 and support fetches on day 2 — after
+        // the 24h window, within the retention period. 403 only when there is
+        // nothing to serve at all. list_files()/read_file() never create the
+        // session directory, so a GET against a never-enabled shop has no
+        // side effects either.
+        if (!$logger->is_enabled() && !$logger->has_retained_files()) {
+            return new WP_REST_Response(array('success' => false, 'code' => 'logging_disabled'), 403);
+        }
+
+        // Read mode. A bare GET /logs reads the newest file, so a caller that
+        // just wants "the logs" gets lines without first listing; an explicit
+        // ?file= reads that file. Either way the response carries which file
+        // was read plus the byte cursor, so the caller can page and, via
+        // ?list=1, discover older files.
+        $file = $request->get_param('file');
+
+        if (empty($file)) {
+            $files = $logger->list_files();
+
+            if (empty($files)) {
+                return new WP_REST_Response(array(
+                    'file'        => null,
+                    'lines'       => array(),
+                    'next_offset' => 0,
+                    'has_more'    => false,
+                    'size'        => 0,
+                ), 200);
+            }
+
+            $newest = end($files);
+            $file = $newest['name'];
+        }
+
+        // read_file() applies the file-name allowlist and realpath
+        // containment, so a traversal or unknown name resolves to null -> 404.
+        $chunk = $logger->read_file(
+            $file,
+            (int) $request->get_param('offset'),
+            (int) $request->get_param('max_bytes')
+        );
+
+        if ($chunk === null) {
+            return new WP_REST_Response(array('success' => false), 404);
+        }
+
+        return new WP_REST_Response(array_merge(array('file' => $file), $chunk), 200);
     }
 
     private function get_orders_count($request)
@@ -452,8 +759,12 @@ class ApiManager
     }
     private function date_param_args()
     {
-        $validate = function ($value) {
+        $validate = function ($value, $request, $param) {
             if (!empty($value) && \DateTime::createFromFormat('Y-m-d\TH:i:s', $value) === false) {
+                LoggingManager::instance()->log(LoggingManager::LEVEL_ERROR, 'rest', 'date param rejected', array(
+                    'param' => $param,
+                    'value' => is_scalar($value) ? (string) $value : gettype($value),
+                ));
                 return new WP_Error('invalid_date', 'Expected ISO 8601 format: Y-m-d\TH:i:s');
             }
             return true;
@@ -648,18 +959,32 @@ class ApiManager
     {
         $data = empty($request->get_body()) ? array() : json_decode($request->get_body(), true);
         
+        $logger = LoggingManager::instance();
+        $previous = get_option(SENDINBLUE_WC_USER_CONNECTION_ID, null);
+
         if (!empty($data['userconnection'])) {
             //check if the value being saved contains only alpha numeric
             if (!preg_match('/^[a-zA-Z0-9]+$/', $data['userconnection'])) {
+                $logger->warn('connection', 'user connection rejected: not alphanumeric');
+
                 return new WP_REST_Response(array('invalid_data' => "Invalid Data"), 400);
             }
-            
+
             $userconnection = $data['userconnection'];
-            
+
             update_option(SENDINBLUE_WC_USER_CONNECTION_ID, $userconnection);
+
+            // The connection id is not a credential, and it is the key that
+            // ties this shop's logs to a record on the Brevo side.
+            $logger->info('connection', 'user connection stored', array(
+                'user_connection_id' => $userconnection,
+                'replaced'           => !empty($previous) && $previous !== $userconnection,
+            ));
 
             return new WP_REST_Response(array('success' => true), 201);
         }
+
+        $logger->warn('connection', 'user connection call carried no id');
 
         return new WP_REST_Response(array('success' => false), 201);
     }
@@ -674,15 +999,25 @@ class ApiManager
             return new WP_REST_Response(array('file_content' => ""), 404);
         }
 
+        $logger = LoggingManager::instance();
         $file_path = wp_upload_dir()['basedir'] .  self::FILE_UPLOADS_PATH . $cleaned_file_name;
         if (!file_exists($file_path)) {
+            $logger->warn('email', 'attachment fetch failed: not on disk', array('file' => $cleaned_file_name));
+
             return new WP_REST_Response(array('file_content' => ""), 404);
         }
 
         $base64_file_data = base64_encode(file_get_contents($file_path));
         if (empty($base64_file_data)) {
+            $logger->warn('email', 'attachment fetch failed: unreadable', array('file' => $cleaned_file_name));
+
             return new WP_REST_Response(array('file_content' => ""), 404);
         }
+
+        $logger->info('email', 'attachment served', array(
+            'file'  => $cleaned_file_name,
+            'bytes' => strlen($base64_file_data),
+        ));
 
         return new WP_REST_Response(array('file_content' => $base64_file_data), 200);
     }
@@ -694,12 +1029,19 @@ class ApiManager
         $cleaned_file_name = preg_replace('/[^A-Za-z0-9\-\_\.]/', '', $cleaned_file_name);
         $file_path = wp_upload_dir()['basedir'] . self::FILE_UPLOADS_PATH . $cleaned_file_name;
         if ($cleaned_file_name == "" || !file_exists($file_path)) {
+            LoggingManager::instance()->warn('email', 'attachment delete failed: not on disk', array(
+                'file' => $cleaned_file_name,
+            ));
+
             return new WP_REST_Response([
                 'message' => 'File not found',
             ], 400);
         }
 
         wp_delete_file($file_path);
+
+        LoggingManager::instance()->info('email', 'attachment deleted', array('file' => $cleaned_file_name));
+
         return new WP_REST_Response([
                 'message' => 'File deleted successfully',
             ], 200);
@@ -712,11 +1054,26 @@ class ApiManager
 
     private function disconnect_connection()
     {
-        $this->flush_option_keys(SENDINBLUE_WC_USER_CONNECTION_ID);
-        $this->flush_option_keys(SENDINBLUE_WC_SETTINGS);
-        $this->flush_option_keys(SENDINBLUE_WC_EMAIL_SETTINGS);
-        $this->flush_option_keys(SENDINBLUE_WOOCOMMERCE_UPDATE);
-        $this->flush_option_keys(SENDINBLUE_WC_ECOMMERCE_REQ);
+        // Recorded per option: a disconnect that only half-clears leaves the
+        // shop in a state that is very hard to reason about afterwards.
+        $cleared = array(
+            'user_connection' => $this->flush_option_keys(SENDINBLUE_WC_USER_CONNECTION_ID),
+            'settings'        => $this->flush_option_keys(SENDINBLUE_WC_SETTINGS),
+            'email_settings'  => $this->flush_option_keys(SENDINBLUE_WC_EMAIL_SETTINGS),
+            'migration_flag'  => $this->flush_option_keys(SENDINBLUE_WOOCOMMERCE_UPDATE),
+            'ecommerce_flag'  => $this->flush_option_keys(SENDINBLUE_WC_ECOMMERCE_REQ),
+            // Remote-flag memory too, so a reconnect behaves like a fresh
+            // install: with the memory gone, the first isPluginLogsEnabled
+            // push after reconnect is a first-sight seed (returns 'none'),
+            // not an edge — re-enabling logging takes a genuine off->on
+            // retoggle afterwards. A live window (if any) still runs out on
+            // its own clamp — disconnect revokes remote control, not the
+            // window.
+            'logs_remote'     => $this->flush_option_keys(SENDINBLUE_WC_LOGS_REMOTE),
+        );
+
+        LoggingManager::instance()->info('connection', 'shop disconnected by Brevo', $cleared);
+
         return new WP_REST_Response(array('success' => true), 200);
     }
 
@@ -731,10 +1088,33 @@ class ApiManager
         $data = json_decode($body, true);
 
         if (!is_array($data)) {
+            LoggingManager::instance()->error('settings', 'settings rejected: body was not JSON', array(
+                'bytes' => strlen((string) $body),
+            ));
+
             return new WP_REST_Response(array('invalid_json' => "Invalid JSON body"), 400);
         }
 
         (get_option(SENDINBLUE_WC_SETTINGS, null) !== null) ? update_option(SENDINBLUE_WC_SETTINGS, $body) : add_option(SENDINBLUE_WC_SETTINGS, $body);
+
+        // Log which settings arrived, not their values — the payload carries
+        // the marketing automation key among other things.
+        $logger = LoggingManager::instance();
+        $logger->info('settings', 'settings replaced by Brevo', array(
+            'keys'  => array_keys($data),
+            'bytes' => strlen($body),
+        ));
+
+        // Debug logging is deliberately NOT read back out of the settings blob
+        // above: the blob is replaced wholesale with whatever Brevo sends, so a
+        // flag living inside it would be remotely settable and never expire.
+        // LoggingManager keeps its own options, clamps the window itself, and
+        // acts on edges only — a repeat of an unchanged value does nothing.
+        // FILTER_VALIDATE_BOOLEAN rather than truthiness: the strings "false"
+        // and "0" must mean off, not on, if the flag ever arrives stringly.
+        if (array_key_exists('isPluginLogsEnabled', $data)) {
+            $logger->apply_remote_flag(filter_var($data['isPluginLogsEnabled'], FILTER_VALIDATE_BOOLEAN), 'brevo');
+        }
 
         return new WP_REST_Response(array('success' => true), 201);
     }
@@ -745,10 +1125,19 @@ class ApiManager
         $data = json_decode($body, true);
 
         if (!is_array($data)) {
+            LoggingManager::instance()->error('settings', 'email settings rejected: body was not JSON', array(
+                'bytes' => strlen((string) $body),
+            ));
+
             return new WP_REST_Response(array('invalid_json' => "Invalid JSON body"), 400);
         }
 
         update_option(SENDINBLUE_WC_EMAIL_SETTINGS, $body);
+
+        LoggingManager::instance()->info('settings', 'email settings replaced by Brevo', array(
+            'keys'  => array_keys($data),
+            'bytes' => strlen($body),
+        ));
 
         return new WP_REST_Response(array('success' => true), 201);
     }
@@ -787,8 +1176,19 @@ class ApiManager
         }
 
         $settings = $this->get_settings();
+        $logger = LoggingManager::instance();
+
+        $logger->info('order', 'order status changed', array(
+            'order_id' => (int) $id,
+            'from'     => $status,
+            'to'       => $new_status,
+        ));
 
         if (empty($settings)) {
+            $logger->warn('order', 'order handling stopped: no settings stored', array(
+                'order_id' => (int) $id,
+            ));
+
             return;
         }
 
@@ -818,6 +1218,18 @@ class ApiManager
             && (strpos(SendinblueClient::COMPLETED_ORDER_STATUS, $new_status) !== false)
         ) {
             $this->trigger_event_customer_sync($order, $opt_in_enabled, $opt_in_checked);
+        } else {
+            // "The contact was not created from this order" is a frequent
+            // ticket, and the reason is always one of these two settings.
+            $logger->debug('contact', 'contact sync not triggered by this transition', array(
+                'order_id'        => (int) $id,
+                'to'              => $new_status,
+                'subscribe_event' => isset($settings[SendinblueClient::IS_SUBSCRIBE_EVENT_ENABLED])
+                    ? $settings[SendinblueClient::IS_SUBSCRIBE_EVENT_ENABLED]
+                    : null,
+                'opt_in_enabled'  => $opt_in_enabled,
+                'opt_in_checked'  => $opt_in_checked,
+            ));
         }
 
         if (!empty($settings[SendinblueClient::IS_ORDER_CONFIRMATION_SMS])
@@ -838,6 +1250,16 @@ class ApiManager
     private function trigger_event_customer_sync($data, $opt_in_enabled, $opt_in_checked)
     {
         $data = $this->prepare_customer_payload($data, $opt_in_enabled, $opt_in_checked);
+
+        // The email is logged raw — it is the key support searches by, same as
+        // the email column in the consumer-side error logs.
+        LoggingManager::instance()->info('contact', 'contact sync triggered from order', array(
+            'order_id'    => isset($data['order_id']) ? $data['order_id'] : null,
+            'email'       => isset($data['email']) ? $data['email'] : null,
+            'subscribed'  => isset($data['subscribed']) ? $data['subscribed'] : null,
+            'is_customer' => isset($data['is_customer']) ? $data['is_customer'] : null,
+        ));
+
         $client = new SendinblueClient();
         $client->eventsSync(SendinblueClient::ORDER_CREATED, $data);
         $client->eventsSync(SendinblueClient::CONTACT_CREATED, $data);
@@ -884,6 +1306,12 @@ class ApiManager
         $data['recipient'] = $order->get_billing_phone();
         $data['country_code'] = $order->get_billing_country();
 
+        LoggingManager::instance()->info('sms', 'transactional SMS triggered', array(
+            'event'        => $event,
+            'order_id'     => $order->get_order_number(),
+            'has_recipient' => !empty($data['recipient']),
+        ));
+
         $client = new SendinblueClient();
         $client->eventsSync($event, $data);
     }
@@ -909,7 +1337,13 @@ class ApiManager
                     $temp_file_name = $user_connection_id . uniqid('_', false) . wp_basename($attachment);
                     $temp_file_name = preg_replace('/[^A-Za-z0-9\-\_\.]/', '', $temp_file_name);
                     $file_path = $complete_file_path . $temp_file_name;
-                    copy($attachment, $file_path);
+                    if (!copy($attachment, $file_path)) {
+                        // Brevo will later ask for this file over /getfilecontents
+                        // and get a 404. Better to see why here than there.
+                        LoggingManager::instance()->error('email', 'attachment copy failed', array(
+                            'file' => $temp_file_name,
+                        ));
+                    }
                     $attachment_path[$i]['temp_file_name'] = $temp_file_name;
                     $attachment_path[$i]['file_name'] = wp_basename($attachment);
                     $i++;
@@ -941,15 +1375,29 @@ class ApiManager
         $consumer_secret = empty($_GET['consumer_secret']) ? $_SERVER['PHP_AUTH_USER'] : $_GET['consumer_secret'];
         $consumer_key = empty($_GET['consumer_key']) ? $_SERVER['PHP_AUTH_PW'] : $_GET['consumer_key'];
 
+        $logger = LoggingManager::instance();
+        // Path only — WooCommerce clients may pass consumer_key/consumer_secret
+        // as query params, which must never reach the log file.
+        $route = isset($_SERVER['REQUEST_URI']) ? (string) wp_parse_url((string) $_SERVER['REQUEST_URI'], PHP_URL_PATH) : '';
+
         if (empty($consumer_secret) || empty($consumer_key)) {
+            $logger->error('rest', 'auth rejected: credentials missing', array('route' => $route));
+
             return new WP_Error('rest_forbidden', __('Sorry, you are not allowed to do that.',SENDINBLUE_WC_TEXTDOMAIN), array( self::HTTP_STATUS => 401 ));
         }
 
         $key = $this->get_key();
 
         if (isset($key) && $key->consumer_secret === $consumer_secret && $key->consumer_key === $consumer_key) {
+            // Accepted auth is deliberately not logged — it fired on every
+            // one of the hundreds of pulls in a sync and said nothing.
             return true;
         }
+
+        $logger->error('rest', 'auth rejected: credentials did not match', array(
+            'route'       => $route,
+            'key_on_file' => isset($key),
+        ));
 
         return new WP_Error('rest_forbidden', __('Sorry, you are not allowed to do that.',SENDINBLUE_WC_TEXTDOMAIN), array( self::HTTP_STATUS => 401 ));
     }
@@ -1039,6 +1487,12 @@ class ApiManager
         get_option(SENDINBLUE_WC_API_KEY_ID, null) !== null ? update_option(SENDINBLUE_WC_API_KEY_ID, $key->key_id) : add_option(SENDINBLUE_WC_API_KEY_ID, $key->key_id);
         get_option(SENDINBLUE_WC_API_CONSUMER_KEY, null) !== null ? update_option(SENDINBLUE_WC_API_CONSUMER_KEY, $key->consumer_key) : add_option(SENDINBLUE_WC_API_CONSUMER_KEY, $key->consumer_key);
 
+        // Key id and owner only — the record does not need the key material.
+        LoggingManager::instance()->info('connection', 'API key created', array(
+            'key_id'  => $key->key_id,
+            'user_id' => $user->ID,
+        ));
+
         return $key;
     }
 
@@ -1049,6 +1503,10 @@ class ApiManager
         if ($key_id = get_option(SENDINBLUE_WC_API_KEY_ID, null)) {
             $wpdb->delete($wpdb->prefix . 'woocommerce_api_keys', array( 'key_id' => $key_id ), array( '%d' ));
         }
+
+        LoggingManager::instance()->info('connection', 'API key revoked', array(
+            'key_id' => $key_id ? (int) $key_id : null,
+        ));
 
         $client = new SendinblueClient();
         $client->eventsSync(SendinblueClient::DELETE_CONNECTION);
@@ -1141,10 +1599,16 @@ class ApiManager
     {
         $settings = $this->get_email_settings();
         if (empty($settings)) {
+            // The gate in front of every transactional email. When mail stops
+            // arriving, this is the first thing worth ruling out.
+            LoggingManager::instance()->debug('email', 'email feature gate: no email settings stored');
+
             return;
         }
 
         if (!isset($settings[SendinblueClient::IS_EMAIL_FEATURE_ENABLED]) || !$settings[SendinblueClient::IS_EMAIL_FEATURE_ENABLED]) {
+            LoggingManager::instance()->debug('email', 'email feature gate: disabled in settings');
+
             return false;
         }
         return $settings;
@@ -1152,7 +1616,12 @@ class ApiManager
 
     public function on_new_customer_creation($customer_id, $new_customer_data, $password_generated) {
         $settings = $this->is_email_feature_enabled();
-        
+
+        LoggingManager::instance()->info('contact', 'customer account created', array(
+            'customer_id'        => (int) $customer_id,
+            'password_generated' => (bool) $password_generated,
+        ));
+
         $email = WC()->mailer()->emails['WC_Email_Customer_New_Account'];
         $attachment_path = $this->get_email_attachments_path($email);
 
@@ -1179,14 +1648,24 @@ class ApiManager
             'limit' => 1,
         ]);
         if (empty($all_customer_notes) || (!empty($all_customer_notes) && $all_customer_notes[0]->id != $note_id)) {
+            LoggingManager::instance()->debug('email', 'customer note skipped: not the latest customer note', array(
+                'note_id'  => (int) $note_id,
+                'order_id' => $order->get_order_number(),
+            ));
+
             return;
         }
-        
+
         $order_details = $this->if_email_enabled_get_order_details($order->get_order_number());
         if (!$order_details)
         {
             return false;
         }
+
+        LoggingManager::instance()->info('email', 'customer note added', array(
+            'note_id'  => (int) $note_id,
+            'order_id' => $order->get_order_number(),
+        ));
 
         $settings = $this->get_email_settings();
         if (isset($settings[SendinblueClient::IS_CUSTOMER_NOTE_EMAIL_ENABLED]) && $settings[SendinblueClient::IS_CUSTOMER_NOTE_EMAIL_ENABLED]) {
@@ -1431,6 +1910,17 @@ class ApiManager
         if (!empty($attachment_path)) {
             $payload['attachment_path'] = $attachment_path;
         }
+
+        // Recipient is logged raw for support lookups. Subject and body are
+        // never logged — they are the merchant's content.
+        LoggingManager::instance()->info('email', 'transactional email queued (Brevo template)', array(
+            'to'          => $to,
+            'template_id' => $template_id,
+            'event_group' => $event_group,
+            'tags'        => $tags,
+            'attachments' => is_array($attachment_path) ? count($attachment_path) : 0,
+        ));
+
         $client = new SendinblueClient();
         $client->eventsSync(SendinblueClient::EMAIL_SEND, $payload);
     }
@@ -1457,10 +1947,20 @@ class ApiManager
         if (!empty($attachment_path)) {
             $payload['attachment_path'] = $attachment_path;
         }
+
+        LoggingManager::instance()->info('email', 'transactional email queued (WooCommerce template)', array(
+            'to'          => $to,
+            'event_group' => $event_group,
+            'tags'        => $tags,
+            'html_bytes'  => is_string($template[0]) ? strlen($template[0]) : 0,
+            'text_bytes'  => is_string($template[1]) ? strlen($template[1]) : 0,
+            'attachments' => is_array($attachment_path) ? count($attachment_path) : 0,
+        ));
+
         $client = new SendinblueClient();
         $client->eventsSync(SendinblueClient::EMAIL_SEND, $payload);
     }
-    
+
     private function prepare_order_data($order)
     {
         if ( null != $order ) {
@@ -1615,6 +2115,9 @@ class ApiManager
             $fee_table .= '</table>';
             return $fee_table;
         } catch (\Exception $e) {
+            LoggingManager::instance()->log(LoggingManager::LEVEL_ERROR, 'email', 'order fee table failed', array(
+                'error' => $e->getMessage(),
+            ));
             return "";
         }
     }

@@ -8,6 +8,7 @@ use SendinblueWoocommerce\Clients\SendinblueClient;
 
 require_once SENDINBLUE_WC_ROOT_PATH . '/src/managers/api-manager.php';
 require_once SENDINBLUE_WC_ROOT_PATH . '/src/clients/sendinblue-client.php';
+require_once SENDINBLUE_WC_ROOT_PATH . '/src/managers/logging-manager.php';
 
 /**
  * Class CategoryManager
@@ -51,28 +52,77 @@ class CategoryManager
 
     public function category_deleted($term_id, $tt_id = '', $taxonomy = '', $category = '')
     {
-        if (self::CAT_TAXONOMY_KEY === $taxonomy && is_object($category) && $this->category_sync_enabled()) {
-            $client = new SendinblueClient();
-            $client->eventsSync(SendinblueClient::CATEGORY_DELETED, $this->prepare_payload($category, true));
+        if (self::CAT_TAXONOMY_KEY !== $taxonomy) {
+            // Fires for every taxonomy on the site, so this is normal, not a
+            // fault — but at debug level it still answers "did we see it?".
+            LoggingManager::instance()->debug('category', 'term delete ignored: not a product category', array(
+                'taxonomy' => $taxonomy,
+            ));
+
+            return;
         }
+
+        if (!is_object($category) || !$this->category_sync_enabled()) {
+            LoggingManager::instance()->debug('category', 'category delete not sent', array(
+                'term_id'      => (int) $term_id,
+                'have_term'    => is_object($category),
+                'sync_enabled' => $this->category_sync_enabled(),
+            ));
+
+            return;
+        }
+
+        LoggingManager::instance()->info('category', 'category deleted', array('term_id' => (int) $term_id));
+
+        $client = new SendinblueClient();
+        $client->eventsSync(SendinblueClient::CATEGORY_DELETED, $this->prepare_payload($category, true));
     }
 
     public function category_updated($term_id, $tt_id = '', $taxonomy = '')
     {
         $category = $this->is_valid_action($term_id, $taxonomy);
-        if (!empty($category) && $this->category_sync_enabled()) {
-            $client = new SendinblueClient();
-            $client->eventsSync(SendinblueClient::CATEGORY_UPDATED, $this->prepare_payload($category));
+        if (empty($category) || !$this->category_sync_enabled()) {
+            $this->log_category_skip('category update not sent', $term_id, $taxonomy, $category);
+
+            return;
         }
+
+        LoggingManager::instance()->info('category', 'category updated', array('term_id' => (int) $term_id));
+
+        $client = new SendinblueClient();
+        $client->eventsSync(SendinblueClient::CATEGORY_UPDATED, $this->prepare_payload($category));
     }
 
     public function category_created($term_id, $tt_id = '', $taxonomy = '')
     {
         $category = $this->is_valid_action($term_id, $taxonomy);
-        if (!empty($category) && $this->category_sync_enabled()) {
-            $client = new SendinblueClient();
-            $client->eventsSync(SendinblueClient::CATEGORY_CREATED, $this->prepare_payload($category));
+        if (empty($category) || !$this->category_sync_enabled()) {
+            $this->log_category_skip('category create not sent', $term_id, $taxonomy, $category);
+
+            return;
         }
+
+        LoggingManager::instance()->info('category', 'category created', array('term_id' => (int) $term_id));
+
+        $client = new SendinblueClient();
+        $client->eventsSync(SendinblueClient::CATEGORY_CREATED, $this->prepare_payload($category));
+    }
+
+    /**
+     * @param string $message
+     * @param int    $term_id
+     * @param string $taxonomy
+     * @param mixed  $category
+     * @return void
+     */
+    private function log_category_skip($message, $term_id, $taxonomy, $category)
+    {
+        LoggingManager::instance()->debug('category', $message, array(
+            'term_id'      => (int) $term_id,
+            'taxonomy'     => $taxonomy,
+            'have_term'    => !empty($category),
+            'sync_enabled' => $this->category_sync_enabled(),
+        ));
     }
 
     public function prepare_payload($category, $is_deleted = false)

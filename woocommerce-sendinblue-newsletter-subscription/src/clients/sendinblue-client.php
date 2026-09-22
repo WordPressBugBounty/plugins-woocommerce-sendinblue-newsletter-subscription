@@ -3,6 +3,10 @@
 
 namespace SendinblueWoocommerce\Clients;
 
+use SendinblueWoocommerce\Managers\LoggingManager;
+
+require_once SENDINBLUE_WC_ROOT_PATH . '/src/managers/logging-manager.php';
+
 /**
  * Class SendinblueClient
  *
@@ -123,9 +127,31 @@ class SendinblueClient
 			$args['body'] = wp_json_encode($body);
 		}
 
+		$started = microtime(true);
+
 		$response               = wp_remote_request($url, $args);
 		$data                   = wp_remote_retrieve_body($response);
 		$response_code          = wp_remote_retrieve_response_code($response);
+
+		// Every call this plugin makes to Brevo passes through here — these
+		// are the main events, so the record carries the request payload and
+		// the response, both as-is. Bodies are bounded so one oversized
+		// response cannot hit the line cap and drop the whole record.
+		$logger = LoggingManager::instance();
+		$logger->log(
+			is_wp_error($response) || (int) $response_code >= 400
+				? LoggingManager::LEVEL_ERROR
+				: LoggingManager::LEVEL_INFO,
+			'http',
+			$method . ' ' . $endpoint,
+			array(
+				'status'      => (int) $response_code,
+				'ms'          => (int) round((microtime(true) - $started) * 1000),
+				'payload'     => $this->boundLogBody($body, isset($args['body']) ? $args['body'] : null),
+				'response'    => $this->boundLogBody(null, $data),
+				'wp_error'    => is_wp_error($response) ? $response->get_error_message() : null,
+			)
+		);
 
 		return [
 			'data' => json_decode($data, true),
@@ -133,10 +159,42 @@ class SendinblueClient
 		];
 	}
 
+	/**
+	 * Body of a request or response, bounded for logging.
+	 *
+	 * The writer rejects lines over 64 KB outright, so an unbounded body
+	 * would silently drop the record it belongs to. Arrays under the size
+	 * limit stay structured; anything larger is replaced by its size.
+	 *
+	 * @param array|null  $structured Structured body, preferred when present.
+	 * @param string|null $raw        Encoded body, used for sizing/fallback.
+	 * @return mixed
+	 */
+	private function boundLogBody($structured, $raw)
+	{
+		$size = is_string($raw) ? strlen($raw) : 0;
+
+		if (is_array($structured) && !empty($structured)) {
+			return $size <= 16384 ? $structured : '[' . $size . ' bytes, too large to log]';
+		}
+
+		if (!is_string($raw) || $raw === '') {
+			return null;
+		}
+
+		return $size <= 16384 ? $raw : substr($raw, 0, 16384) . '...[truncated, ' . $size . ' bytes total]';
+	}
+
 	public function eventsSync($event, $data = array())
 	{
 		$user_connection_id = get_option(SENDINBLUE_WC_USER_CONNECTION_ID, null);
 		if (empty($user_connection_id)) {
+			// "The shop stopped sending events" almost always turns out to be
+			// this. Without a line here the drop leaves no trace anywhere.
+			LoggingManager::instance()->warn('http', 'event dropped: shop not connected', array(
+				'event' => $event,
+			));
+
 			return;
 		}
 
@@ -160,6 +218,8 @@ class SendinblueClient
 	{
 		$user_connection_id = get_option(SENDINBLUE_WC_USER_CONNECTION_ID, null);
 		if (empty($user_connection_id)) {
+			LoggingManager::instance()->warn('http', 'ecommerce enable skipped: shop not connected');
+
 			return false;
 		}
 
@@ -173,6 +233,10 @@ class SendinblueClient
 	{
 		$user_connection_id = get_option(SENDINBLUE_WC_USER_CONNECTION_ID, null);
 		if (empty($user_connection_id)) {
+			LoggingManager::instance()->warn('product', 'back-in-stock request dropped: shop not connected', array(
+				'product_id' => (int) $productId,
+			));
+
 			return ['code' => 400, 'data' => ['error' => 'User connection ID missing']];
 		}
 

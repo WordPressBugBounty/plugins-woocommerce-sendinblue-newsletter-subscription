@@ -8,6 +8,7 @@ use SendinblueWoocommerce\Clients\SendinblueClient;
 
 require_once SENDINBLUE_WC_ROOT_PATH . '/src/managers/api-manager.php';
 require_once SENDINBLUE_WC_ROOT_PATH . '/src/clients/sendinblue-client.php';
+require_once SENDINBLUE_WC_ROOT_PATH . '/src/managers/logging-manager.php';
 
 /**
  * Class OrdersManager
@@ -74,12 +75,28 @@ class OrdersManager
 
     public function order_created($order_id)
     {
+        $logger = LoggingManager::instance();
         $order = $this->is_valid_action($order_id);
-        if (!empty($order) && $this->order_sync_enabled()) {
-            $client = new SendinblueClient();
-            $client->eventsSync(SendinblueClient::ORDER_CREATE, $this->prepare_payload($order));
+
+        if (empty($order)) {
+            $logger->warn('order', 'order sync skipped: order not found', array('order_id' => (int) $order_id));
+
+            return;
         }
 
+        if (!$this->order_sync_enabled()) {
+            $logger->debug('order', 'order sync skipped: order sync disabled', array('order_id' => (int) $order_id));
+
+            return;
+        }
+
+        $logger->info('order', 'order sync triggered', array(
+            'order_id' => (int) $order_id,
+            'event'    => SendinblueClient::ORDER_CREATE,
+        ));
+
+        $client = new SendinblueClient();
+        $client->eventsSync(SendinblueClient::ORDER_CREATE, $this->prepare_payload($order));
     }
 
     public function order_events($order_id, $status = 'pending', $new_status = 'on-hold')
@@ -106,10 +123,32 @@ class OrdersManager
             $event = SendinblueClient::ORDER_CREATE;
         }
 
-        if (!empty($order) && $this->order_sync_enabled() && !empty($event)) {
-            $client = new SendinblueClient();
-            $client->eventsSync($event, $this->prepare_payload($order));
+        $logger = LoggingManager::instance();
+
+        if (empty($order) || !$this->order_sync_enabled() || empty($event)) {
+            // Three separate reasons an order event goes nowhere, and from the
+            // outside they look identical. Naming which one fired is the whole
+            // point of logging this path.
+            $logger->debug('order', 'order event not sent', array(
+                'order_id'     => (int) $order_id,
+                'to'           => $new_status,
+                'order_found'  => !empty($order),
+                'sync_enabled' => $this->order_sync_enabled(),
+                'event'        => empty($event) ? null : $event,
+            ));
+
+            return;
         }
+
+        $logger->info('order', 'order event sent', array(
+            'order_id' => (int) $order_id,
+            'from'     => $status,
+            'to'       => $new_status,
+            'event'    => $event,
+        ));
+
+        $client = new SendinblueClient();
+        $client->eventsSync($event, $this->prepare_payload($order));
     }
 
     public function prepare_payload($order)

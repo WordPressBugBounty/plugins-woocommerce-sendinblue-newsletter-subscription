@@ -10,6 +10,7 @@ use SendinblueWoocommerce\Managers\CartEventsManagers;
 require_once SENDINBLUE_WC_ROOT_PATH . '/src/managers/api-manager.php';
 require_once SENDINBLUE_WC_ROOT_PATH . '/src/managers/cart-events-manager.php';
 require_once SENDINBLUE_WC_ROOT_PATH . '/src/clients/sendinblue-client.php';
+require_once SENDINBLUE_WC_ROOT_PATH . '/src/managers/logging-manager.php';
 
 /**
  * Class AdminManager
@@ -37,6 +38,22 @@ class AdminManager
         add_action('wp_footer', array($this, 'brevo_hook_javascript_footer'));
         add_action('wp_ajax_sendinblue_dismiss_security_banner', array($this, 'dismissSecurityBanner'));
         add_action('admin_enqueue_scripts', array($this, 'enqueueSecurityBannerScript'));
+        // Retention must not depend on the write path: once a logging window
+        // lapses nothing writes anymore, so without this a captured session
+        // would sit on disk forever while the readme promises deletion. sweep()
+        // also runs the lazy expiry check is_enabled() that the base branch
+        // hooked here, so a lapsed window is still closed on quiet shops. The
+        // closure defers instance() to when admin_init actually fires — run()
+        // executes on front-end requests too.
+        add_action('admin_init', function () {
+            LoggingManager::instance()->sweep();
+        });
+        // Cron fallback for shops whose wp-admin nobody opens after the
+        // window lapses — enable() schedules the daily event, sweep()
+        // unschedules it once no session directory remains.
+        add_action(LoggingManager::CRON_HOOK, function () {
+            LoggingManager::instance()->sweep();
+        });
     }
 
     public function dismissSecurityBanner()
@@ -100,6 +117,11 @@ class AdminManager
         try {
             $user_connection_id = preg_replace('/[^a-zA-Z0-9]/', '', get_option(SENDINBLUE_WC_USER_CONNECTION_ID, null));
 
+            LoggingManager::instance()->info('admin', 'Brevo settings page opened', array(
+                'connected'          => !empty($user_connection_id),
+                'user_connection_id' => empty($user_connection_id) ? null : $user_connection_id,
+            ));
+
             if (!empty($user_connection_id)) {
                 $settingsUrl = SendinblueClient::INTEGRATION_URL . $user_connection_id . SendinblueClient::SETTINGS_URL;
                 $smsCampaignUrl = SendinblueClient::SMS_CAMPAIGN_URL;
@@ -132,8 +154,13 @@ class AdminManager
             $connectUrl = SendinblueClient::INTEGRATION_URL . SendinblueClient::CONNECT_URL . '?' . http_build_query($query_params);
 
             include SENDINBLUE_WC_ROOT_PATH . '/src/views/admin_view.php';
-            
+
         } catch (Exception $e) {
+            // Reaches the merchant as a bare wp_die() with no context anywhere.
+            LoggingManager::instance()->error('admin', 'settings page failed to render', array(
+                'error' => $e->getMessage(),
+            ));
+
             wp_die(__($e->getMessage()));
         }
     }

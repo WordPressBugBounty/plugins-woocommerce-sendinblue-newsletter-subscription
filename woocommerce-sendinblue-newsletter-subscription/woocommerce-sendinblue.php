@@ -6,7 +6,7 @@
  * Author: Brevo
  * Text Domain: woocommerce-sendinblue-newsletter-subscription
  * Domain Path: /languages
- * Version: 4.0.59
+ * Version: 4.0.60
  * Author URI: https://www.brevo.com/?r=wporg
  * Requires at least: 4.3.1
  * Tested up to: 7.1
@@ -37,6 +37,7 @@ use SendinblueWoocommerce\Managers\AdminManager;
 use SendinblueWoocommerce\Managers\ApiManager;
 use SendinblueWoocommerce\Managers\UpdatePluginManagers;
 use SendinblueWoocommerce\Managers\CartEventsManagers;
+use SendinblueWoocommerce\Managers\LoggingManager;
 
 define('SENDINBLUE_WC_ROOT_PATH', dirname(__FILE__));
 define('SENDINBLUE_WC_TEXTDOMAIN', 'woocommerce-sendinblue-newsletter-subscription');
@@ -47,7 +48,7 @@ define('SENDINBLUE_WC_SETTINGS', 'sendinblue_woocommerce_user_connection_setting
 define('SENDINBLUE_WC_EMAIL_SETTINGS', 'sendinblue_woocommerce_email_options_settings');
 define('SENDINBLUE_WC_VERSION_SENT', 'sendinblue_woocommerce_version_sent');
 define('API_KEY_V3_OPTION_NAME', 'sib_wc_api_key_v3');
-define('SENDINBLUE_WC_PLUGIN_VERSION', '4.0.59');
+define('SENDINBLUE_WC_PLUGIN_VERSION', '4.0.60');
 define('SENDINBLUE_WORDPRESS_SHOP_VERSION', $GLOBALS['wp_version']);
 define('SENDINBLUE_WOOCOMMERCE_UPDATE', 'sendinblue_plugin_update_call_apiv3');
 define('SENDINBLUE_REDIRECT', 'sendinblue_woocommerce_redirect');
@@ -55,10 +56,27 @@ define('SENDINBLUE_WC_ECOMMERCE_REQ', 'sendinblue_woocommerce_ecommerce_requires
 define('SENDINBLUE_ECOMMERCE_CALLED_TIME', 'ecommerce_called_time');
 define('SENDINBLUE_IS_PLUGIN_INFO_UPDATED', 'sendinblue_is_plugin_info_updated');
 define('SENDINBLUE_SECURITY_BANNER_DISMISSED', 'sendinblue_security_banner_dismissed');
+define('SENDINBLUE_WC_LOGS_HASH', 'sendinblue_woocommerce_logs_hash');
+define('SENDINBLUE_WC_LOGS_DIR', 'sendinblue_woocommerce_logs_dir');
+define('SENDINBLUE_WC_LOGS_ENABLED', 'sendinblue_woocommerce_logs_enabled');
+define('SENDINBLUE_WC_LOGS_EXPIRES', 'sendinblue_woocommerce_logs_expires');
+// Last isPluginLogsEnabled value Brevo propagated, so the /configs accept path
+// acts on edges only (see LoggingManager::remote_transition()).
+define('SENDINBLUE_WC_LOGS_REMOTE', 'sendinblue_woocommerce_logs_remote');
+
+// Debug-logging escape hatch for local development and support reproduction.
+// Off by default — "logging off by default on a fresh install" is an
+// acceptance criterion on SCP-7020. Override from wp-config.php (the guard
+// means a define there wins, same bar as WP_DEBUG); the merchant-facing way
+// to turn logging on is the bounded 24h window, not this constant.
+if (!defined('SENDINBLUE_WC_DEBUG_LOGS')) {
+    define('SENDINBLUE_WC_DEBUG_LOGS', false);
+}
 
 require_once SENDINBLUE_WC_ROOT_PATH . '/src/managers/api-manager.php';
 require_once SENDINBLUE_WC_ROOT_PATH . '/src/managers/admin-manager.php';
 require_once SENDINBLUE_WC_ROOT_PATH . '/src/managers/update-plugin-manager.php';
+require_once SENDINBLUE_WC_ROOT_PATH . '/src/managers/logging-manager.php';
 
 function update_woocom_email_settings()
 {
@@ -211,12 +229,24 @@ function sendinblue_woocommerce_activate()
     global $wp_rewrite;
     $wp_rewrite->flush_rules();
     (get_option(SENDINBLUE_REDIRECT, null) !== null) ? update_option(SENDINBLUE_REDIRECT, true) : add_option(SENDINBLUE_REDIRECT, true);
+
+    $logger = new LoggingManager();
+    $logger->info('lifecycle', 'plugin activated', array(
+        'plugin_version' => SENDINBLUE_WC_PLUGIN_VERSION,
+        'wp_version'     => SENDINBLUE_WORDPRESS_SHOP_VERSION,
+        'multisite'      => is_multisite(),
+    ));
 }
 
 function sendinblue_woocommerce_deactivate()
 {
     global $wp_rewrite;
     $wp_rewrite->flush_rules();
+
+    $logger = new LoggingManager();
+    $logger->info('lifecycle', 'plugin deactivated', array(
+        'plugin_version' => SENDINBLUE_WC_PLUGIN_VERSION,
+    ));
 }
 
 function sendinblue_woocommerce_uninstall()
@@ -229,6 +259,17 @@ function sendinblue_woocommerce_uninstall()
     $api_manager->flush_option_keys(SENDINBLUE_WOOCOMMERCE_UPDATE);
     $api_manager->flush_option_keys(SENDINBLUE_WC_ECOMMERCE_REQ);
     $api_manager->flush_option_keys(SENDINBLUE_IS_PLUGIN_INFO_UPDATED);
+
+    // Debug logs are shop data. Remove the files and the directory rather than
+    // leaving them behind under uploads after the plugin is gone.
+    $logging_manager = new LoggingManager();
+    $logging_manager->delete_all();
+    wp_clear_scheduled_hook(LoggingManager::CRON_HOOK);
+    $api_manager->flush_option_keys(SENDINBLUE_WC_LOGS_HASH);
+    $api_manager->flush_option_keys(SENDINBLUE_WC_LOGS_DIR);
+    $api_manager->flush_option_keys(SENDINBLUE_WC_LOGS_ENABLED);
+    $api_manager->flush_option_keys(SENDINBLUE_WC_LOGS_EXPIRES);
+    $api_manager->flush_option_keys(SENDINBLUE_WC_LOGS_REMOTE);
 }
 
 function sendinblue_woocommerce_update()

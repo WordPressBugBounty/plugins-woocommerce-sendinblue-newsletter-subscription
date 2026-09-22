@@ -7,6 +7,7 @@ use SendinblueWoocommerce\Managers\ApiManager;
 
 require_once SENDINBLUE_WC_ROOT_PATH . '/src/managers/api-manager.php';
 require_once SENDINBLUE_WC_ROOT_PATH . '/src/clients/sendinblue-client.php';
+require_once SENDINBLUE_WC_ROOT_PATH . '/src/managers/logging-manager.php';
 
 /**
  * Class UpdatePluginManagers
@@ -302,9 +303,18 @@ class UpdatePluginManagers
             "consumerSecret" => $key->consumer_secret
         );
 
+        // One-shot migration off the pre-v3 connection. It runs once and then
+        // the flag stops it forever, so if it goes wrong there is no second
+        // chance to observe it — hence logging the outcome, not just the start.
         $response = $this
             ->client_manager
             ->saveSettings($settings);
+
+        LoggingManager::instance()->info('update', 'legacy settings migrated to Brevo', array(
+            'status'           => isset($response['code']) ? $response['code'] : null,
+            'connection_keys'  => array_keys($settings['connection_settings']),
+            'email_keys'       => array_keys($settings['email_settings']),
+        ));
 
         $this->api_manager->flush_option_keys(API_KEY_V3_OPTION_NAME);
     }
@@ -325,11 +335,19 @@ class UpdatePluginManagers
         //thus we keep getting incessent calls on MS BE
         if (empty($settings[SendinblueClient::IS_PRODUCT_SYNC_ENABLED])) {
             $response = $this->client_manager->enableEcommerce();
-            if (!empty($response) && $response['code'] == 201) {
-                update_option(SENDINBLUE_WC_ECOMMERCE_REQ, true);
-            } else {
-                update_option(SENDINBLUE_WC_ECOMMERCE_REQ, false);
-            }
+            $accepted = !empty($response) && $response['code'] == 201;
+
+            // This call retries every two minutes until it succeeds, so a
+            // failure here is the cause of the repeated-calls pattern that
+            // shows up on the MS BE side.
+            LoggingManager::instance()->log(
+                $accepted ? LoggingManager::LEVEL_INFO : LoggingManager::LEVEL_WARN,
+                'update',
+                $accepted ? 'ecommerce enabled' : 'ecommerce enable rejected, will retry',
+                array('status' => isset($response['code']) ? $response['code'] : null)
+            );
+
+            update_option(SENDINBLUE_WC_ECOMMERCE_REQ, $accepted);
         }
     }
 
@@ -356,6 +374,15 @@ class UpdatePluginManagers
         ) {
             $data['settings']['is_checkout_block_default'] = true;
         }
+
+        // Version skew between what the shop runs and what Brevo believes it
+        // runs explains a whole class of "this feature should exist" reports.
+        LoggingManager::instance()->info('update', 'plugin version reported to Brevo', array(
+            'from'         => $sendinblue_version,
+            'to'           => SENDINBLUE_WC_PLUGIN_VERSION,
+            'shop_version' => SENDINBLUE_WORDPRESS_SHOP_VERSION,
+            'block_checkout' => !empty($data['settings']['is_checkout_block_default']),
+        ));
 
         $this->client_manager->eventsSync(SendinblueClient::PLUGIN_UPDATED, $data);
         (get_option(SENDINBLUE_WC_VERSION_SENT, null) !== null) ? update_option(SENDINBLUE_WC_VERSION_SENT, SENDINBLUE_WC_PLUGIN_VERSION) : add_option(SENDINBLUE_WC_VERSION_SENT, SENDINBLUE_WC_PLUGIN_VERSION);

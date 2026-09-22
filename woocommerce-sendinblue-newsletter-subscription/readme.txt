@@ -159,6 +159,9 @@ Brevo also integrates with most lead capture and advanced form builder plugins.
 = How can I receive support? =
 If you need some assistance, you can post an issue in the Support tab, or send us an email at contact@brevo.com.
 
+= Does the plugin record diagnostic logs? =
+Brevo can turn on temporary diagnostic logging for your store remotely. Only with your prior consent. Logging is not turned on by default. If you contact Brevo support about a problem, they can temporarily enable it remotely — only with your prior consent — for up to 24 hours to help diagnose the issue. During that time, it records information about the plugin's activity, such as orders, products, syncing, settings changes, and pages involved, which may include customer emails and order details. The logs are stored on your website and can be accessed by Brevo support, then are automatically deleted after a few days.
+
 
 == Screenshots ==
 1. Click on “Connect your account” to link WooCommerce and your Brevo account.
@@ -167,6 +170,11 @@ If you need some assistance, you can post an issue in the Support tab, or send u
 4. You can access your settings by clicking on “Settings” at the top right of the screen.
 
 == Changelog ==
+
+= 4.0.60 =
+* Hardened on-demand diagnostic logging so it never impacts the storefront.
+* Improved credential redaction in diagnostic logs.
+* Improved remote log retrieval for Brevo support.
 
 = 4.0.59 =
 * Fixed an issue where visitors could be automatically added as contacts in Brevo when filling out any form field with input type as email. Contacts are now only added when a visitor intentionally shares their details.
