@@ -50,6 +50,11 @@ class ApiManager
         add_action('wp_login', array($cart_events_manager, 'wp_login_action'), 11, 2);
         add_action('wp_footer', array($cart_events_manager, 'ws_cart_custom_fragment_load'));
         add_filter('woocommerce_add_to_cart_fragments', array($cart_events_manager, 'ws_cart_custom_fragment'), 10, 1);
+        // order_completed (automation): capture cart context at checkout, send on
+        // the confirmed-status transition, keep the thank-you page as a fallback.
+        add_action('woocommerce_checkout_create_order', array($cart_events_manager, 'store_checkout_context'), 10, 1);
+        add_action('woocommerce_store_api_checkout_update_order_meta', array($cart_events_manager, 'store_checkout_context'), 10, 1);
+        add_action('woocommerce_order_status_changed', array($cart_events_manager, 'on_order_status_changed'), 9, 4);
         add_action('woocommerce_thankyou', array($cart_events_manager, 'ws_checkout_completed'));
         add_action('woocommerce_order_status_changed', array($this, 'on_order_status_changed' ), 10, 3);
         add_action('woocommerce_order_status_refunded', array($this, 'on_order_status_refunded'), 10, 1);
@@ -69,6 +74,7 @@ class ApiManager
         add_filter('woocommerce_add_to_cart', array($cart_events_manager, 'handle_cart_update_event' ), 10, 1);
         add_action('woocommerce_cart_item_removed', array($cart_events_manager, 'handle_cart_update_event' ), 10, 1 );
         add_action('woocommerce_before_single_product_summary', array($products_events_manager, 'product_viewed'), 10);
+        add_action('wp_footer', array($products_events_manager, 'product_viewed'));
         add_action('woocommerce_product_set_stock_status', array($products_events_manager, 'product_stock_events'), 10, 1);
         add_action('woocommerce_variation_set_stock_status', array($products_events_manager, 'product_stock_events'), 10, 1);
         add_action('woocommerce_reduce_order_stock', array($products_events_manager, 'product_stock_update_on_order'), 10, 1);

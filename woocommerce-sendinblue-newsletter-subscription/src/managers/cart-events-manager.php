@@ -299,54 +299,201 @@ class CartEventsManagers
         return $cart_updated;
     }
 
+    /**
+     * Order statuses that mean the order is confirmed for the customer:
+     * paid online (processing/completed), cash on delivery (processing),
+     * free orders (processing/completed) and manual payments awaiting
+     * confirmation (on-hold).
+     */
+    private static $order_completed_statuses = array('processing', 'completed', 'on-hold');
+
+    const ORDER_COMPLETED_SENT_META = '_thankyou_action_done';
+    const ORDER_CART_ID_META = '_sib_cart_id';
+    const ORDER_TRACKING_EMAIL_META = '_sib_tracking_email';
+
+    /**
+     * Runs in the customer's own checkout request (classic and Blocks), before
+     * the order is first saved. The cart id and tracking email only exist as
+     * cookies in that request, so they are copied onto the order for the
+     * server-side order_completed event, which may be sent later from a
+     * gateway webhook, WP-Cron or the admin.
+     */
+    public function store_checkout_context($order)
+    {
+        if (!is_object($order) || !method_exists($order, 'update_meta_data')) {
+            return;
+        }
+
+        try {
+            $cart_id = $this->get_wc_cart_id();
+            if ('' !== $cart_id) {
+                $order->update_meta_data(self::ORDER_CART_ID_META, $cart_id);
+            }
+
+            $email = $this->resolve_tracking_email($order);
+            if ('' !== $email) {
+                $order->update_meta_data(self::ORDER_TRACKING_EMAIL_META, $email);
+            }
+        } catch (\Throwable $e) {
+            $this->log_order_completed_failure('store checkout context', $e);
+        } catch (\Exception $e) {
+            // PHP 5.6 has no \Throwable; this arm is dead on 7+.
+            $this->log_order_completed_failure('store checkout context', $e);
+        }
+    }
+
+    /**
+     * Primary trigger for order_completed: the order reaching a confirmed status.
+     * Covers online payment (incl. gateway webhooks when the customer never
+     * returns to the site), cash on delivery and free orders.
+     */
+    public function on_order_status_changed($order_id, $old_status = '', $new_status = '', $order = null)
+    {
+        if (!in_array($new_status, self::$order_completed_statuses, true)) {
+            return;
+        }
+
+        if (!is_object($order) || !method_exists($order, 'get_meta')) {
+            $order = wc_get_order($order_id);
+        }
+
+        if (!$order) {
+            LoggingManager::instance()->log(LoggingManager::LEVEL_ERROR, 'order', 'order status changed but order not loadable', array(
+                'order_id'   => $order_id,
+                'new_status' => $new_status,
+            ));
+            return;
+        }
+
+        $this->try_send_order_completed($order, 'status:' . $new_status);
+    }
+
+    /**
+     * Fallback trigger on the thank-you page. The status hook normally sends
+     * first; this only catches orders that reached a confirmed status without
+     * the status hook running. Never sends for pending or failed orders.
+     */
     public function ws_checkout_completed($order_id)
     {
-        $ma_key = $this->get_ma_key();
-        $logger = LoggingManager::instance();
-
-        if (empty($ma_key)) {
-            $logger->debug('cart', 'order completed event skipped: abandoned cart tracking off', array(
-                'order_id' => (int) $order_id,
-            ));
-
-            return;
-        }
-
-        if (get_post_meta($order_id, '_thankyou_action_done', true)) {
-            // The thank-you page can be reloaded any number of times; this flag
-            // is what stops a duplicate order event on each refresh.
-            $logger->debug('cart', 'order completed event skipped: already sent', array(
-                'order_id' => (int) $order_id,
-            ));
-
-            return;
-        }
-
         $order = wc_get_order($order_id);
         if (!$order) {
-            $logger->log(LoggingManager::LEVEL_ERROR, 'order', 'checkout completed but order not loadable', array(
+            LoggingManager::instance()->log(LoggingManager::LEVEL_ERROR, 'order', 'checkout completed but order not loadable', array(
                 'order_id' => $order_id,
             ));
             return;
         }
-        $order->update_meta_data('_thankyou_action_done', true);
-        $order->save();
+
+        if (!$order->has_status(self::$order_completed_statuses)) {
+            LoggingManager::instance()->debug('cart', 'order completed event skipped: order not confirmed yet', array(
+                'order_id' => (int) $order_id,
+                'status'   => $order->get_status(),
+            ));
+            return;
+        }
+
+        $this->try_send_order_completed($order, 'thankyou');
+    }
+
+    /**
+     * Error boundary: the status hook runs inside checkout and gateway
+     * webhooks, so a failure while building or sending the event is logged
+     * and swallowed. It must never break the order or the customer's site.
+     */
+    private function try_send_order_completed($order, $source)
+    {
+        try {
+            return $this->send_order_completed($order, $source);
+        } catch (\Throwable $e) {
+            $this->log_order_completed_failure($source, $e);
+        } catch (\Exception $e) {
+            // PHP 5.6 has no \Throwable; this arm is dead on 7+.
+            $this->log_order_completed_failure($source, $e);
+        }
+
+        return false;
+    }
+
+    private function log_order_completed_failure($source, $e)
+    {
+        LoggingManager::instance()->log(LoggingManager::LEVEL_ERROR, 'order', 'order completed event failed', array(
+            'source'  => $source,
+            'error'   => $e->getMessage(),
+            'file'    => basename($e->getFile()) . ':' . $e->getLine(),
+        ));
+    }
+
+    private function send_order_completed($order, $source)
+    {
+        $ma_key = $this->get_ma_key();
+        $logger = LoggingManager::instance();
+        $order_id = (int) $order->get_id();
+
+        if (empty($ma_key)) {
+            $logger->debug('cart', 'order completed event skipped: abandoned cart tracking off', array(
+                'order_id' => $order_id,
+                'source'   => $source,
+            ));
+
+            return false;
+        }
+
+        // Sent once per order: a status can be reached more than once
+        // (on-hold -> processing -> completed) and the thank-you page can be
+        // reloaded any number of times. Read through the order so it works
+        // with HPOS as well as post meta.
+        if ($order->get_meta(self::ORDER_COMPLETED_SENT_META)) {
+            $logger->debug('cart', 'order completed event skipped: already sent', array(
+                'order_id' => $order_id,
+                'source'   => $source,
+            ));
+
+            return false;
+        }
+
         $tracking_event_data = $this->get_tracking_data_order($order_id);
 
         if (empty($tracking_event_data['email'])) {
             $logger->warn('cart', 'order completed event dropped: no email on order', array(
-                'order_id' => (int) $order_id,
+                'order_id' => $order_id,
+                'source'   => $source,
             ));
 
-            return;
+            return false;
         }
 
+        // Mark as sent once the payload is complete and before the HTTP call,
+        // so a second trigger for the same order (next status change,
+        // thank-you page) skips, while a failure above leaves the order
+        // eligible for the fallback trigger.
+        $order->update_meta_data(self::ORDER_COMPLETED_SENT_META, true);
+        $order->save();
+
         $logger->info('cart', 'order completed event sent', array(
-            'order_id' => (int) $order_id,
+            'order_id' => $order_id,
             'email'    => $tracking_event_data['email'],
+            'source'   => $source,
+            'status'   => $order->get_status(),
         ));
 
         $this->automation_manager->send($tracking_event_data, $ma_key);
+
+        return true;
+    }
+
+    /**
+     * Email the automation event is attributed to. Logged-in customers use
+     * their tracked email; guests and staff (anyone who can manage the shop,
+     * shop managers included) use the billing email.
+     */
+    private function resolve_tracking_email($order)
+    {
+        $email = !empty($this->get_email_id()) ? $this->get_email_id() : '';
+
+        if (!$this->is_user_logged_in() || current_user_can('manage_woocommerce')) {
+            $email = !empty($order->get_billing_email()) ? $order->get_billing_email() : '';
+        }
+
+        return is_string($email) ? $email : '';
     }
 
     public function get_wc_cart_id()
@@ -470,14 +617,19 @@ class CartEventsManagers
     {
         $order = wc_get_order($order_id);
         $data = array();
-        $cart_id = $this->get_wc_cart_id();
-        $email = !empty($this->get_email_id()) ? $this->get_email_id() : '';
 
-        if (!$this->is_user_logged_in() || $this->is_administrator()) {
-            $email = ! empty( $order->get_billing_email() ) ? $order->get_billing_email() : '';
-        }
+        // Prefer the cart id and email captured in the checkout request: when
+        // the event is sent from a gateway webhook or the admin, the customer's
+        // cookies are not available and the event would not close out the cart.
+        $stored_cart_id = $order->get_meta(self::ORDER_CART_ID_META);
+        $cart_id = !empty($stored_cart_id) ? $stored_cart_id : $this->get_wc_cart_id();
 
-        if ('' != $email){
+        $stored_email = $order->get_meta(self::ORDER_TRACKING_EMAIL_META);
+        $email = !empty($stored_email) ? $stored_email : $this->resolve_tracking_email($order);
+
+        // Only refresh the tracking cookie in the customer's own browser; staff
+        // confirming payment must not get the customer's email cookie.
+        if ('' != $email && !current_user_can('manage_woocommerce')) {
             $this->set_email_id_cookie($email);
         }
 

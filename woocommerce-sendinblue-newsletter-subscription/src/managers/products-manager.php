@@ -19,6 +19,9 @@ class ProductsManager
 {
     private $api_manager;
 
+    /** @var bool Whether product_viewed has already fired for this request. */
+    private static $product_view_tracked = false;
+
     private const PRODUCT_DEFAULT_KEYS = [
         'id',
         'name',
@@ -247,6 +250,14 @@ class ProductsManager
 
     public function product_viewed($product_id = null)
     {
+        // Hooked on both woocommerce_before_single_product_summary (classic
+        // templates) and wp_footer (page builders such as Elementor Pro, which
+        // never fire the summary hook) — send at most once per request.
+        if (self::$product_view_tracked || !function_exists('is_product') || !is_product()) {
+            return false;
+        }
+        self::$product_view_tracked = true;
+
         $settings = $this->api_manager->get_settings();
 
         if (empty($settings[SendinblueClient::IS_ABANDONED_CART_ENABLED]) ||
@@ -255,9 +266,11 @@ class ProductsManager
             return false;
         }
 
-        global $product;
+        // Use the queried product, not global $product: builders never set the
+        // global, and by wp_footer it can point at the last related product.
+        $product = wc_get_product(get_queried_object_id());
         $email_id = $this->user_email();
-        if (empty($product) || empty($email_id)) {
+        if (!$product instanceof \WC_Product || empty($email_id)) {
             // No email means an anonymous visitor who has not yet identified
             // themselves — expected on most page views, but it is also the
             // answer to "why are product views missing for some visitors".
