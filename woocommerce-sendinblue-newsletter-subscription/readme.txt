@@ -171,6 +171,9 @@ Brevo can turn on temporary diagnostic logging for your store remotely. Only wit
 
 == Changelog ==
 
+= 4.0.62 =
+* Plugin improvements related to block checkout
+
 = 4.0.61 =
 * Plugin improvements related to product viewed events
 * Plugin improvements related to order completed events

@@ -6,7 +6,7 @@
  * Author: Brevo
  * Text Domain: woocommerce-sendinblue-newsletter-subscription
  * Domain Path: /languages
- * Version: 4.0.61
+ * Version: 4.0.62
  * Author URI: https://www.brevo.com/?r=wporg
  * Requires at least: 4.3.1
  * Tested up to: 7.1
@@ -48,7 +48,7 @@ define('SENDINBLUE_WC_SETTINGS', 'sendinblue_woocommerce_user_connection_setting
 define('SENDINBLUE_WC_EMAIL_SETTINGS', 'sendinblue_woocommerce_email_options_settings');
 define('SENDINBLUE_WC_VERSION_SENT', 'sendinblue_woocommerce_version_sent');
 define('API_KEY_V3_OPTION_NAME', 'sib_wc_api_key_v3');
-define('SENDINBLUE_WC_PLUGIN_VERSION', '4.0.61');
+define('SENDINBLUE_WC_PLUGIN_VERSION', '4.0.62');
 define('SENDINBLUE_WORDPRESS_SHOP_VERSION', $GLOBALS['wp_version']);
 define('SENDINBLUE_WOOCOMMERCE_UPDATE', 'sendinblue_plugin_update_call_apiv3');
 define('SENDINBLUE_REDIRECT', 'sendinblue_woocommerce_redirect');
@@ -164,13 +164,26 @@ function sendinblue_woocommerce_load()
     $api_manager->add_hooks();
     update_woocom_email_settings();
 
-    $checkout_block_class_exists = class_exists( 'Automattic\WooCommerce\Blocks\Domain\Services\CheckoutFields' );
-    if ($checkout_block_class_exists && (\Automattic\WooCommerce\Blocks\Utils\CartCheckoutUtils::is_checkout_block_default())) {
-        $cart_events_manager = new CartEventsManagers();
-        $cart_events_manager->add_optin_wc_checkout_block();
-    } else {
-        $api_manager->add_conditional_hooks();
-    }
+    // Decide and register the checkout opt-in field on `woocommerce_init`, not here on
+    // `plugins_loaded`. WooCommerce + its Blocks package are only guaranteed to be fully
+    // loaded by `woocommerce_init`, so both the block-vs-classic detection
+    // (`CheckoutFields` / `is_checkout_block_default()`) and the additional-field
+    // registration are reliable there. Doing this on `plugins_loaded` can mis-detect the
+    // checkout type (leaving the block opt-in field unregistered, so it never renders/saves)
+    // and WooCommerce also requires additional checkout fields to be registered on
+    // `woocommerce_init` or later. When the opt-in is not captured the order syncs with
+    // opt_in_checked=false and the contact is blocklisted even though the shopper opted in
+    // (ECOMM-222 / L3I-147009, L3I-146774). The classic branch only registers checkout-time
+    // hooks, which fire well after `woocommerce_init`, so moving it here is safe.
+    add_action('woocommerce_init', function () use ($api_manager) {
+        $checkout_block_class_exists = class_exists('Automattic\WooCommerce\Blocks\Domain\Services\CheckoutFields');
+        if ($checkout_block_class_exists && (\Automattic\WooCommerce\Blocks\Utils\CartCheckoutUtils::is_checkout_block_default())) {
+            $cart_events_manager = new CartEventsManagers();
+            $cart_events_manager->add_optin_wc_checkout_block();
+        } else {
+            $api_manager->add_conditional_hooks();
+        }
+    });
 }
 
 //Declare HPOS, Cart Checkout Blocks Compatibility
