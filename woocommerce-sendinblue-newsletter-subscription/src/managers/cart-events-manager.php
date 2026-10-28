@@ -21,9 +21,34 @@ require_once SENDINBLUE_WC_ROOT_PATH . '/src/managers/logging-manager.php';
  */
 class CartEventsManagers
 {
+    /**
+     * Cross-device abandoned-cart recovery (ECOMM-212). The cart_updated event
+     * carries a cart/checkout URL with a recovery token; opening that URL
+     * rebuilds the exact cart server-side, so the email CTA works even on a
+     * different device or in incognito, where the session cookie that normally
+     * holds the cart is absent. The token is a random per-cart value issued for
+     * logged-in customers and guests alike (a guest cart_updated is a tracked
+     * event too); it is never derived from the email, so it can't select another
+     * session's cart. It is cleared when the cart is emptied or the order is
+     * placed, so a stale link stops working rather than replaying.
+     */
+    // Transient key stays short: '_transient_timeout_' (19) + prefix (7) + 32
+    // hex = 58, under the 64-char option_name column of WordPress < 4.4.
+    const CART_RECOVERY_PARAM         = 'sib_bac';
+    const CART_RECOVERY_PREFIX        = 'sib_cr_';
+    const CART_RECOVERY_SESSION_KEY   = 'sib_cart_recovered';
+    const CART_RECOVERY_TOKEN_SESSION = 'sib_cart_recovery_token';
+
     private $automation_manager;
 
     private $api_manager;
+
+    /**
+     * Raised while we repopulate the cart during recovery, so our own
+     * woocommerce_add_to_cart handler does not emit a cart_updated event for
+     * each restored line (noise, and it could re-arm the abandoned-cart timer).
+     */
+    private $is_restoring_cart = false;
 
     function __construct()
     {
@@ -115,6 +140,7 @@ class CartEventsManagers
             if (empty(WC()->cart->cart_contents) && !empty(WC()->cart->removed_cart_contents)) {
                 $tracking_event_data = $this->get_tracking_data_cart_deleted($cart_id);
                 $tracking_event_data['event'] = 'cart_deleted';
+                $this->invalidate_cart_recovery_snapshot();
             } elseif (!empty(WC()->cart->cart_contents)) {
                 $tracking_event_data = $this->get_tracking_data_cart($cart_id, $email_id);
                 $tracking_event_data['event'] = 'cart_updated';
@@ -227,6 +253,7 @@ class CartEventsManagers
         if (empty(WC()->cart->cart_contents) && !empty(WC()->cart->removed_cart_contents)) {
             $tracking_event_data = $this->get_tracking_data_cart_deleted($cart_id);
             $tracking_event_data['event'] = 'cart_deleted';
+            $this->invalidate_cart_recovery_snapshot();
         } else {
             return $cart_fragments;
         }
@@ -261,6 +288,12 @@ class CartEventsManagers
 
     public function handle_cart_update_event($cart_updated)
     {
+        // Don't echo a cart_updated while we are rebuilding the cart from a
+        // recovery link; the lines are being restored, not freshly changed.
+        if ($this->is_restoring_cart) {
+            return $cart_updated;
+        }
+
         $ma_key = $this->get_ma_key();
 
         if (empty($this->get_email_id()) || empty($ma_key)) {
@@ -285,6 +318,9 @@ class CartEventsManagers
                 'event_id' => $event_id,
             ));
         } else {
+            // Cart emptied: drop any recovery snapshot so a previously issued
+            // link can't restore items the shopper has removed.
+            $this->invalidate_cart_recovery_snapshot();
             LoggingManager::instance()->debug('cart', 'cart update skipped', array('reason' => 'cart empty'));
 
             return $cart_updated;
@@ -557,12 +593,21 @@ class CartEventsManagers
         $data['tax_parsed'] = self::parsePrice($data['tax']);
         $data['total_parsed'] = self::parsePrice($data['total']);
         $data['currency'] = is_string(get_woocommerce_currency()) ? get_woocommerce_currency() : '';
+
+        // Plain cart/checkout URLs. The recovery token is appended after the
+        // items loop below, and only when a non-empty snapshot was actually
+        // stored, so a cart whose lines are all unrecoverable (custom item data)
+        // never ships a token that would restore a stale, unrelated cart.
         $data['url'] = is_string(wc_get_cart_url()) ? wc_get_cart_url() : '';
         $data['checkouturl'] = is_string(wc_get_checkout_url()) ? wc_get_checkout_url() : '';
 
         $data['items'] = array();
+        $recovery_snapshot = array();
         foreach ($cartitems as $key => $cartitem) {
             $item = array();
+            // Evaluate now, before the lines below add plugin-specific keys
+            // (e.g. variation_sku) to the local $cartitem copy.
+            $line_has_custom_data = $this->cart_item_has_custom_data($cartitem);
             $item['name'] = (!empty($cartitem['data']->get_title()) && is_string( $cartitem['data']->get_title() ) ) ? $cartitem['data']->get_title() : '';
             $item['sku'] = (!empty( $cartitem['data']->get_sku()) && is_string($cartitem['data']->get_sku())) ? $cartitem['data']->get_sku() : '';
             $item['id'] = (!empty($cartitem['product_id']) && is_numeric($cartitem['product_id']) && ! is_nan( $cartitem['product_id'])) ? $cartitem['product_id'] : '';
@@ -599,6 +644,40 @@ class CartEventsManagers
 
             $item['url'] = (!empty($cartitem['data']->get_permalink()) && is_string($cartitem['data']->get_permalink())) ? $cartitem['data']->get_permalink() : '';
             array_push($data['items'], $item);
+
+            // Snapshot only lines we can faithfully rebuild from product,
+            // variation and quantity (no prices or PII are stored). Lines with
+            // custom item data can't be reconstructed from these fields alone;
+            // restoring them would risk a wrong line, price or false duplicate,
+            // so they stay in the event payload but out of the recovery snapshot.
+            if ($line_has_custom_data) {
+                continue;
+            }
+            $recovery_snapshot[] = array(
+                'product_id'   => (!empty($cartitem['product_id']) && is_numeric($cartitem['product_id'])) ? (int) $cartitem['product_id'] : 0,
+                'variation_id' => (!empty($cartitem['variation_id']) && is_numeric($cartitem['variation_id'])) ? (int) $cartitem['variation_id'] : 0,
+                'quantity'     => (!empty($cartitem['quantity']) && is_numeric($cartitem['quantity']) && $cartitem['quantity'] > 0) ? $cartitem['quantity'] : 1,
+                'variation'    => (isset($cartitem['variation']) && is_array($cartitem['variation'])) ? $cartitem['variation'] : array(),
+            );
+        }
+
+        // Persist the snapshot and tag the URLs only when there is something to
+        // restore. The customer (logged-in or guest) gets a per-cart recovery
+        // token; if every line was unrecoverable (custom item data) the snapshot
+        // is empty, so we drop any stale snapshot and leave the URLs plain rather
+        // than shipping a token that would restore an unrelated older cart.
+        if (!empty($recovery_snapshot)) {
+            $recovery_token = $this->get_or_create_cart_recovery_token();
+            if ('' !== $recovery_token && $this->store_cart_recovery_snapshot($recovery_token, $recovery_snapshot)) {
+                if ('' !== $data['url']) {
+                    $data['url'] = add_query_arg(self::CART_RECOVERY_PARAM, $recovery_token, $data['url']);
+                }
+                if ('' !== $data['checkouturl']) {
+                    $data['checkouturl'] = add_query_arg(self::CART_RECOVERY_PARAM, $recovery_token, $data['checkouturl']);
+                }
+            }
+        } else {
+            $this->invalidate_cart_recovery_snapshot();
         }
 
         $data_track = array(
@@ -766,6 +845,250 @@ class CartEventsManagers
     {
         $current_user = wp_get_current_user();
         return $current_user->ID;
+    }
+
+    /**
+     * Recovery token for the current cart. Issued for both logged-in customers
+     * and guests (a WooCommerce guest cart_updated is a tracked event too, so it
+     * gets cross-device recovery like any other). A random, unguessable token is
+     * generated once per cart session and kept in WooCommerce session data, so it
+     * is never derived from the email (the_ajax_hook `tracking_email`, the
+     * `email_id` cookie) and cannot be used to select another session's snapshot:
+     * the link only ever re-adds this session's own items to the opener's cart.
+     * Reused for the life of the cart and cleared when the cart is emptied/
+     * ordered, so a stale link stops working rather than replaying forever.
+     * Administrators/staff are excluded. Returns '' when no WooCommerce session
+     * is available.
+     */
+    private function get_or_create_cart_recovery_token()
+    {
+        $user = wp_get_current_user();
+        if ($this->is_administrator($user)) {
+            return '';
+        }
+
+        if (!function_exists('WC') || is_null(WC()->session)) {
+            return '';
+        }
+
+        $token = WC()->session->get(self::CART_RECOVERY_TOKEN_SESSION);
+        if (!is_string($token) || !preg_match('/^[a-f0-9]{32}$/', $token)) {
+            // 128-bit random hex; uniqid(more_entropy) + wp_rand + salt keep it
+            // unpredictable on PHP 5.6 (no random_bytes dependency).
+            $token = substr(hash('sha256', uniqid((string) wp_rand(), true) . wp_salt('auth')), 0, 32);
+            WC()->session->set(self::CART_RECOVERY_TOKEN_SESSION, $token);
+        }
+
+        return $token;
+    }
+
+    /**
+     * Drop the recovery snapshot for the current cart and forget its token, so a
+     * previously issued link can't restore items after the cart is emptied or the
+     * order is placed. No-op when there is no token. The next cart gets a fresh
+     * token.
+     */
+    private function invalidate_cart_recovery_snapshot()
+    {
+        if (!function_exists('WC') || is_null(WC()->session)) {
+            return;
+        }
+
+        $token = WC()->session->get(self::CART_RECOVERY_TOKEN_SESSION);
+        if (is_string($token) && '' !== $token) {
+            delete_transient(self::CART_RECOVERY_PREFIX . $token);
+            WC()->session->set(self::CART_RECOVERY_TOKEN_SESSION, null);
+        }
+    }
+
+    /**
+     * Fired on woocommerce_cart_emptied, which covers order placement (classic
+     * and Blocks) as well as an explicit "empty cart". The cart-update hooks
+     * don't run on that path, so the snapshot would otherwise survive and a
+     * recovery link could refill already-purchased items.
+     */
+    public function on_cart_emptied()
+    {
+        $this->invalidate_cart_recovery_snapshot();
+    }
+
+    /**
+     * Cart-item keys populated by WooCommerce core. A line carrying any key
+     * outside this set holds custom data (add-ons, bundles, gift options,
+     * subscriptions, ...) that can't be rebuilt from product/variation/quantity
+     * alone, so it is excluded from the recovery snapshot.
+     */
+    private static $standard_cart_item_keys = array(
+        'key', 'product_id', 'variation_id', 'variation', 'quantity', 'data', 'data_hash',
+        'line_tax_data', 'line_subtotal', 'line_subtotal_tax', 'line_total', 'line_tax',
+    );
+
+    private function cart_item_has_custom_data($cartitem)
+    {
+        if (!is_array($cartitem)) {
+            return false;
+        }
+
+        return !empty(array_diff(array_keys($cartitem), self::$standard_cart_item_keys));
+    }
+
+    /**
+     * Persist a lean snapshot of the cart lines so the recovery link can rebuild
+     * the cart later. Best-effort: a storage failure must never break the event.
+     * Returns true only when the snapshot was stored, so the caller knows whether
+     * it is safe to put the token on the URLs.
+     */
+    private function store_cart_recovery_snapshot($token, $snapshot)
+    {
+        if ('' === $token || empty($snapshot) || !is_array($snapshot)) {
+            return false;
+        }
+
+        try {
+            // 30 days without MONTH_IN_SECONDS (WP >= 4.4 only); DAY_IN_SECONDS
+            // ships since 3.5.
+            return (bool) set_transient(self::CART_RECOVERY_PREFIX . $token, $snapshot, 30 * DAY_IN_SECONDS);
+        } catch (\Throwable $e) {
+            LoggingManager::instance()->error('cart', 'cart recovery snapshot not stored', array('error' => $e->getMessage()));
+        } catch (\Exception $e) {
+            // PHP 5.6 has no \Throwable; this arm is dead on 7+.
+            LoggingManager::instance()->error('cart', 'cart recovery snapshot not stored', array('error' => $e->getMessage()));
+        }
+
+        return false;
+    }
+
+    /**
+     * Front-end entry point (wp_loaded): when the request carries a cart recovery
+     * token, rebuild the cart from the stored snapshot. Guarded and swallowed so
+     * it can never take the storefront down.
+     */
+    public function maybe_restore_abandoned_cart()
+    {
+        // Cheapest guard first: the token must be present on the request.
+        if (empty($_GET[self::CART_RECOVERY_PARAM])) {
+            return;
+        }
+
+        // Never run in admin, AJAX, cron or REST contexts.
+        if (
+            is_admin() ||
+            (function_exists('wp_doing_ajax') && wp_doing_ajax()) ||
+            (defined('DOING_CRON') && DOING_CRON) ||
+            (defined('REST_REQUEST') && REST_REQUEST)
+        ) {
+            return;
+        }
+
+        try {
+            $token = sanitize_text_field(wp_unslash($_GET[self::CART_RECOVERY_PARAM]));
+            $this->restore_abandoned_cart($token);
+        } catch (\Throwable $e) {
+            LoggingManager::instance()->error('cart', 'cart recovery failed', array('error' => $e->getMessage()));
+        } catch (\Exception $e) {
+            // PHP 5.6 has no \Throwable; this arm is dead on 7+.
+            LoggingManager::instance()->error('cart', 'cart recovery failed', array('error' => $e->getMessage()));
+        }
+    }
+
+    /**
+     * Rebuild the cart from a stored snapshot. Idempotent per session, merges
+     * with (never clobbers) an existing cart, and silently skips products that
+     * no longer exist or can't be purchased.
+     */
+    private function restore_abandoned_cart($token)
+    {
+        // Defensive: the token is a sha256 hex digest.
+        if (!is_string($token) || !preg_match('/^[a-f0-9]{16,64}$/', $token)) {
+            return;
+        }
+
+        if (!function_exists('WC') || is_null(WC()->cart) || is_null(WC()->session)) {
+            return;
+        }
+
+        // Restore each token at most once per session, so navigating the site
+        // or reloading the cart page does not keep re-adding items, while a
+        // different recovery link opened later in the same session still works.
+        $handled = WC()->session->get(self::CART_RECOVERY_SESSION_KEY);
+        $handled = is_array($handled) ? $handled : array();
+        if (in_array($token, $handled, true)) {
+            return;
+        }
+
+        $snapshot = get_transient(self::CART_RECOVERY_PREFIX . $token);
+        if (empty($snapshot) || !is_array($snapshot)) {
+            // Nothing to restore: an expired/missing snapshot needs no marker.
+            // The token only rides on this one request, so there is no reload to
+            // guard against, and a cookie-less first-time visitor could not
+            // persist the marker anyway.
+            return;
+        }
+
+        // Keep the restore silent: WC_Cart::add_to_cart() raises error notices
+        // for out-of-stock / unpurchasable / insufficient-stock lines, which
+        // would render a red banner on the cart page. We pre-filter those lines,
+        // and restore the pre-existing notices afterwards as a belt-and-braces
+        // guard so nothing our restore triggered leaks onto the page.
+        $prior_notices = function_exists('wc_get_notices') ? wc_get_notices() : array();
+
+        $restored = 0;
+        // Suppress our own cart_updated echo while we repopulate the cart.
+        $this->is_restoring_cart = true;
+        try {
+            foreach ($snapshot as $line) {
+                if (!is_array($line) || empty($line['product_id'])) {
+                    continue;
+                }
+
+                $product_id   = (int) $line['product_id'];
+                $variation_id = isset($line['variation_id']) ? (int) $line['variation_id'] : 0;
+                $quantity     = (isset($line['quantity']) && is_numeric($line['quantity']) && $line['quantity'] > 0) ? $line['quantity'] : 1;
+                $variation    = (isset($line['variation']) && is_array($line['variation'])) ? $line['variation'] : array();
+
+                // Skip products that can't be added right now: gone, not
+                // purchasable, out of stock, or short on stock. This is what
+                // keeps add_to_cart() from emitting an error notice.
+                $product = wc_get_product($variation_id ? $variation_id : $product_id);
+                if (!$product || !$product->exists() || !$product->is_purchasable() || !$product->is_in_stock()) {
+                    continue;
+                }
+
+                // Sold-individually products cap at one; clamp before adding.
+                if ($product->is_sold_individually()) {
+                    $quantity = 1;
+                }
+
+                if (!$product->has_enough_stock($quantity)) {
+                    continue;
+                }
+
+                // Don't duplicate a line the shopper already has in their cart.
+                $cart_item_id = WC()->cart->generate_cart_id($product_id, $variation_id, $variation);
+                if (WC()->cart->find_product_in_cart($cart_item_id)) {
+                    continue;
+                }
+
+                if (WC()->cart->add_to_cart($product_id, $quantity, $variation_id, $variation)) {
+                    $restored++;
+                }
+            }
+        } finally {
+            $this->is_restoring_cart = false;
+            // Drop anything add_to_cart() may have queued and reinstate the
+            // notices that existed before the restore ran.
+            if (function_exists('wc_clear_notices') && function_exists('wc_set_notices')) {
+                wc_clear_notices();
+                wc_set_notices($prior_notices);
+            }
+        }
+
+        $handled[] = $token;
+        WC()->session->set(self::CART_RECOVERY_SESSION_KEY, $handled);
+
+        if ($restored > 0) {
+            LoggingManager::instance()->info('cart', 'abandoned cart restored', array('items' => $restored));
+        }
     }
 
     private function checkout_label($settings)

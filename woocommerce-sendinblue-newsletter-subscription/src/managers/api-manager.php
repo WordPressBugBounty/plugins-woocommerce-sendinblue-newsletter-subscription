@@ -73,6 +73,13 @@ class ApiManager
         add_filter('woocommerce_update_cart_action_cart_updated', array($cart_events_manager, 'handle_cart_update_event' ), 10, 1);
         add_filter('woocommerce_add_to_cart', array($cart_events_manager, 'handle_cart_update_event' ), 10, 1);
         add_action('woocommerce_cart_item_removed', array($cart_events_manager, 'handle_cart_update_event' ), 10, 1 );
+        // ECOMM-212: rebuild the cart from a recovery link. Priority 25 keeps it
+        // just after WooCommerce's own add-to-cart URL handler (wp_loaded:20),
+        // so WC()->cart is guaranteed loaded.
+        add_action('wp_loaded', array($cart_events_manager, 'maybe_restore_abandoned_cart'), 25);
+        // ECOMM-212: drop the recovery snapshot when the cart is emptied, which
+        // also covers order placement (classic + Blocks empty the cart there).
+        add_action('woocommerce_cart_emptied', array($cart_events_manager, 'on_cart_emptied'));
         add_action('woocommerce_before_single_product_summary', array($products_events_manager, 'product_viewed'), 10);
         add_action('wp_footer', array($products_events_manager, 'product_viewed'));
         add_action('woocommerce_product_set_stock_status', array($products_events_manager, 'product_stock_events'), 10, 1);

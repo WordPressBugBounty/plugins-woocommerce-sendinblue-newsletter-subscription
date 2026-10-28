@@ -171,6 +171,9 @@ Brevo can turn on temporary diagnostic logging for your store remotely. Only wit
 
 == Changelog ==
 
+= 4.0.63 =
+* New: Dynamic cart URLs in cart events. Cart events sent to Brevo now include a cart URL that restores the customer's cart on any browser or device.
+
 = 4.0.62 =
 * Plugin improvements related to block checkout
 
